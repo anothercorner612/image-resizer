@@ -159,38 +159,52 @@ class ImageDiagnostics {
       console.log(`⚠️  EXTREME UPSCALING: ${(scalingInfo.scaled.scaleFactor * 100).toFixed(0)}%`);
     }
 
-    // Try background removal
-    console.log('Testing background removal...');
+    // Try background removal with ACTUAL AI
+    console.log('Testing AI background removal...');
     let backgroundRemoved;
     analysis.backgroundRemovalFailed = false;
+    analysis.backgroundRemovalTime = 0;
 
     try {
-      // Test with a simplified approach - don't use AI, just check what happens
-      const testProcessor = sharp(originalBuffer);
-      backgroundRemoved = await testProcessor
-        .ensureAlpha()
-        .toBuffer();
+      const startTime = Date.now();
+
+      // Import and use the actual AI background removal
+      const { removeBackground } = await import('@imgly/background-removal-node');
+      const blob = await removeBackground(originalBuffer);
+
+      // Convert Blob to Buffer
+      const arrayBuffer = await blob.arrayBuffer();
+      backgroundRemoved = Buffer.from(arrayBuffer);
+
+      analysis.backgroundRemovalTime = Date.now() - startTime;
+      console.log(`✓ AI background removal OK (${analysis.backgroundRemovalTime}ms)`);
 
       const removedMeta = await sharp(backgroundRemoved).metadata();
 
       // Save for comparison
       await fs.writeFile(
-        `${this.outputDir}/${product.id}_2_alpha.png`,
+        `${this.outputDir}/${product.id}_2_ai_removed.png`,
         backgroundRemoved
       );
 
       analysis.afterBackgroundRemoval = {
         width: removedMeta.width,
         height: removedMeta.height,
-        hasAlpha: removedMeta.hasAlpha
+        hasAlpha: removedMeta.hasAlpha,
+        changed: originalBuffer.length !== backgroundRemoved.length
       };
 
-      console.log('Background processing: OK');
-
     } catch (error) {
-      console.log(`⚠️  BACKGROUND REMOVAL FAILED: ${error.message}`);
+      console.log(`✗ AI BACKGROUND REMOVAL FAILED: ${error.message}`);
       analysis.backgroundRemovalFailed = true;
+      analysis.backgroundRemovalError = error.message;
       backgroundRemoved = originalBuffer;
+
+      // Save original as "removed" so we can see it failed
+      await fs.writeFile(
+        `${this.outputDir}/${product.id}_2_ai_removed.png`,
+        originalBuffer
+      );
     }
 
     // Check shadow sizing
@@ -298,6 +312,17 @@ class ImageDiagnostics {
     <li>Format: ${p.original.format}</li>
     <li>Has Alpha: ${p.original.hasAlpha ? 'Yes' : 'No'}</li>
     <li>Size: ${(p.original.size / 1024).toFixed(0)} KB</li>
+    ${p.hasWhiteBorder ? '<li class="warning-text">⚠️ White border detected</li>' : ''}
+  </ul>
+
+  <h4>AI Background Removal</h4>
+  <ul>
+    <li>Status: ${p.backgroundRemovalFailed ? '<span class="issue">FAILED</span>' : '<span class="ok-text">SUCCESS</span>'}</li>
+    ${p.backgroundRemovalFailed ? `<li class="issue">Error: ${p.backgroundRemovalError || 'Unknown'}</li>` : `<li>Processing time: ${p.backgroundRemovalTime}ms</li>`}
+    ${p.afterBackgroundRemoval ? `
+    <li>Output: ${p.afterBackgroundRemoval.width}×${p.afterBackgroundRemoval.height}</li>
+    <li>Image Changed: ${p.afterBackgroundRemoval.changed ? '<span class="ok-text">Yes</span>' : '<span class="issue">No - IDENTICAL TO ORIGINAL</span>'}</li>
+    ` : ''}
   </ul>
 
   <h4>Categorization</h4>
@@ -315,7 +340,8 @@ class ImageDiagnostics {
   </ul>
 
   ${hasIssues ? '<h4>⚠️ Issues Detected</h4><ul>' : ''}
-  ${p.backgroundRemovalFailed ? '<li class="issue">Background removal failed</li>' : ''}
+  ${p.backgroundRemovalFailed ? `<li class="issue">AI background removal failed: ${p.backgroundRemovalError || 'Unknown error'}</li>` : ''}
+  ${p.afterBackgroundRemoval && !p.afterBackgroundRemoval.changed ? '<li class="issue">Background removal had no effect (file size unchanged)</li>' : ''}
   ${p.hasWhiteBorder ? '<li class="issue">White border detected in original</li>' : ''}
   ${p.tooSmall ? '<li class="issue">Original image very small (< 400px)</li>' : ''}
   ${p.scalingIssue ? '<li class="issue">Extreme upscaling required (> 200%)</li>' : ''}
