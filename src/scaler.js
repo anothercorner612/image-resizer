@@ -7,6 +7,9 @@ export class ProductScaler {
     this.canvasWidth = canvasWidth;
     this.canvasHeight = canvasHeight;
 
+    // Maximum scale factor to prevent blurry upscaling (150%)
+    this.maxScaleFactor = 1.5;
+
     // Keywords for small/accessory detection
     this.smallAccessoryKeywords = [
       'pin',
@@ -101,9 +104,16 @@ export class ProductScaler {
 
       case 'default':
       default:
-        // 82% of longest side
+        // 82% of longest side, but cap at 150% maximum scale factor
         const longestSide = Math.max(width, height);
-        const scaleFactor = (this.canvasHeight * 0.82) / longestSide;
+        let scaleFactor = (this.canvasHeight * 0.82) / longestSide;
+
+        // Cap scale factor at 150% to prevent blurry upscaling
+        if (scaleFactor > this.maxScaleFactor) {
+          console.log(`⚠️  Capping scale factor at ${this.maxScaleFactor * 100}% (would have been ${(scaleFactor * 100).toFixed(1)}%)`);
+          scaleFactor = this.maxScaleFactor;
+        }
+
         scaledWidth = Math.round(width * scaleFactor);
         scaledHeight = Math.round(height * scaleFactor);
         break;
@@ -125,7 +135,8 @@ export class ProductScaler {
     return {
       width: scaledWidth,
       height: scaledHeight,
-      scaleFactor: scaledWidth / width
+      scaleFactor: scaledWidth / width,
+      cappedAt150: category === 'default' && (scaledWidth / width) >= this.maxScaleFactor
     };
   }
 
@@ -205,6 +216,9 @@ export class ProductScaler {
     console.log(`Original: ${scalingInfo.original.width}×${scalingInfo.original.height}`);
     console.log(`Scaled: ${scalingInfo.scaled.width}×${scalingInfo.scaled.height}`);
     console.log(`Scale Factor: ${(scalingInfo.scaled.scaleFactor * 100).toFixed(1)}%`);
+    if (scalingInfo.scaled.cappedAt150) {
+      console.log('⚠️  Scale capped at 150% to prevent blurry upscaling');
+    }
     console.log(`Canvas: ${scalingInfo.canvas.width}×${scalingInfo.canvas.height}`);
     console.log(`Aspect Ratio: ${scalingInfo.aspectRatio}`);
     console.log('-------------------------\n');

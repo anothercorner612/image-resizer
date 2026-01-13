@@ -27,12 +27,16 @@ export class ImageProcessor {
     try {
       console.log('\n=== Processing Image ===');
 
-      // 1. Load image and get metadata
-      const image = sharp(buffer);
+      // 1. Auto-trim black bars and letterboxing
+      console.log('Auto-trimming letterboxing/black bars...');
+      const trimmedBuffer = await this.autoTrim(buffer);
+
+      // 2. Load image and get metadata
+      const image = sharp(trimmedBuffer);
       const metadata = await image.metadata();
       console.log(`Original dimensions: ${metadata.width}×${metadata.height}`);
 
-      // 2. Get scaling information
+      // 3. Get scaling information
       const scalingInfo = this.scaler.getScalingInfo(
         metadata.width,
         metadata.height,
@@ -41,9 +45,9 @@ export class ImageProcessor {
       );
       this.scaler.logScalingInfo(scalingInfo);
 
-      // 3. Remove background and resize
+      // 4. Remove background and resize
       console.log('Removing background and resizing...');
-      const processedProduct = await this.removeBackground(buffer);
+      const processedProduct = await this.removeBackground(trimmedBuffer);
       const resizedProduct = await sharp(processedProduct)
         .resize(scalingInfo.scaled.width, scalingInfo.scaled.height, {
           fit: 'contain',
@@ -51,24 +55,24 @@ export class ImageProcessor {
         })
         .toBuffer();
 
-      // 4. Create canvas with background color
+      // 5. Create canvas with background color
       console.log('Creating canvas with background...');
       const canvas = await this.createCanvas();
 
-      // 5. Generate contact shadow
+      // 6. Generate contact shadow
       console.log('Generating contact shadow...');
       const shadowBuffer = await this.createContactShadow(
         scalingInfo.scaled.width,
         scalingInfo.scaled.height
       );
 
-      // 6. Get positioning
+      // 7. Get positioning
       const centerPos = this.scaler.getCenterPosition(
         scalingInfo.scaled.width,
         scalingInfo.scaled.height
       );
 
-      // 7. Composite everything together
+      // 8. Composite everything together
       console.log('Compositing layers...');
       const finalImage = await sharp(canvas)
         .composite([
@@ -106,6 +110,69 @@ export class ImageProcessor {
     } catch (error) {
       console.error('Error processing image:', error.message);
       throw error;
+    }
+  }
+
+  /**
+   * Auto-trim black bars and letterboxing from images
+   * Removes solid black or white borders before processing
+   * @param {Buffer} buffer - Input image buffer
+   * @returns {Promise<Buffer>} Trimmed image buffer
+   */
+  async autoTrim(buffer) {
+    try {
+      const image = sharp(buffer);
+      const metadata = await image.metadata();
+
+      // Try trimming with threshold for black/white borders
+      // threshold: difference from edge pixel (0-100)
+      // background: color to trim (black by default)
+      let trimmedBuffer = await image
+        .trim({
+          threshold: 10, // Allow slight variation in color
+          background: { r: 0, g: 0, b: 0 } // Trim black
+        })
+        .toBuffer();
+
+      // Check if trimming actually removed something
+      const trimmedMetadata = await sharp(trimmedBuffer).metadata();
+      const trimmedSignificantly = (
+        (metadata.width - trimmedMetadata.width) > 10 ||
+        (metadata.height - trimmedMetadata.height) > 10
+      );
+
+      if (trimmedSignificantly) {
+        console.log(`✓ Trimmed black bars: ${metadata.width}×${metadata.height} → ${trimmedMetadata.width}×${trimmedMetadata.height}`);
+        buffer = trimmedBuffer;
+      }
+
+      // Also try trimming white borders
+      trimmedBuffer = await sharp(buffer)
+        .trim({
+          threshold: 10,
+          background: { r: 255, g: 255, b: 255 } // Trim white
+        })
+        .toBuffer();
+
+      // Check if white trimming removed something
+      const whiteMetadata = await sharp(trimmedBuffer).metadata();
+      const currentMetadata = await sharp(buffer).metadata();
+      const whiteTrimmedSignificantly = (
+        (currentMetadata.width - whiteMetadata.width) > 10 ||
+        (currentMetadata.height - whiteMetadata.height) > 10
+      );
+
+      if (whiteTrimmedSignificantly) {
+        console.log(`✓ Trimmed white borders: ${currentMetadata.width}×${currentMetadata.height} → ${whiteMetadata.width}×${whiteMetadata.height}`);
+        buffer = trimmedBuffer;
+      }
+
+      return buffer;
+
+    } catch (error) {
+      console.warn('Auto-trim failed, using original image:', error.message);
+      // Return original if trimming fails
+      return buffer;
     }
   }
 
