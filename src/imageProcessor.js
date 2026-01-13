@@ -228,7 +228,29 @@ export class ImageProcessor {
 
       // Convert Blob to Buffer
       const arrayBuffer = await blob.arrayBuffer();
-      const resultBuffer = Buffer.from(arrayBuffer);
+      let resultBuffer = Buffer.from(arrayBuffer);
+
+      // Post-process: Aggressively trim any remaining near-white or near-black edges
+      // This catches residual background the AI might have left behind
+      console.log('Cleaning up edges...');
+      try {
+        // Try trimming near-white pixels (threshold 40 catches light grays)
+        const whiteTrimmed = await sharp(resultBuffer)
+          .trim({ threshold: 40 })
+          .toBuffer();
+
+        const originalMeta = await sharp(resultBuffer).metadata();
+        const trimmedMeta = await sharp(whiteTrimmed).metadata();
+
+        // Only use trimmed version if it actually removed something (at least 10px)
+        if ((originalMeta.width - trimmedMeta.width) > 10 ||
+            (originalMeta.height - trimmedMeta.height) > 10) {
+          console.log(`✓ Trimmed ${originalMeta.width - trimmedMeta.width}px width, ${originalMeta.height - trimmedMeta.height}px height`);
+          resultBuffer = whiteTrimmed;
+        }
+      } catch (trimError) {
+        console.log('Edge cleanup skipped (already clean)');
+      }
 
       console.log('✓ Background removed successfully');
       return resultBuffer;
@@ -292,6 +314,7 @@ export class ImageProcessor {
     const shadowPos = this.scaler.getShadowPosition(productWidth, productHeight);
 
     // Create SVG for elliptical shadow with blur
+    // Position shadow AT the bottom edge (center at productHeight puts shadow directly at base)
     const svg = `
       <svg width="${productWidth}" height="${productHeight}">
         <defs>
@@ -301,7 +324,7 @@ export class ImageProcessor {
         </defs>
         <ellipse
           cx="${productWidth / 2}"
-          cy="${productHeight - shadowPos.ry}"
+          cy="${productHeight}"
           rx="${shadowPos.rx}"
           ry="${shadowPos.ry}"
           fill="rgba(0, 0, 0, ${this.shadowOpacity})"
