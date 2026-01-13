@@ -1,42 +1,35 @@
-const sharp = require('sharp');
-const path = require('path');
-const fs = require('fs').promises;
-const { spawn } = require('child_process');
+import sharp from 'sharp';
+import path from 'path';
+import { promises as fs } from 'fs';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 
-class ImageProcessor {
+// Fix for __dirname in ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export class ImageProcessor {
   constructor(config) {
     this.config = config;
     this.pythonPath = 'python3'; 
     this.scriptPath = path.join(__dirname, 'remove_bg.py');
   }
 
-  /**
-   * Main processing function
-   */
   async process(inputBuffer) {
     const tempInput = path.join(__dirname, `temp_in_${Date.now()}.png`);
     const tempOutput = path.join(__dirname, `temp_out_${Date.now()}.png`);
 
     try {
-      // 1. Save buffer to temp file for Python to read
       await fs.writeFile(tempInput, inputBuffer);
-
-      // 2. Run Python background removal
       await this.runPythonRemoveBg(tempInput, tempOutput);
 
-      // 3. Load the result from Python
       let processedImage = sharp(tempOutput);
-
-      // 4. TRIM: This is crucial. It finds the actual edges of the product
-      // that the Python script made solid.
       const trimmedBuffer = await processedImage.trim().toBuffer();
       const metadata = await sharp(trimmedBuffer).metadata();
 
-      // 5. Create the 2000x2500 Canvas (Light Gray #f2f2f2)
       const canvasWidth = 2000;
       const canvasHeight = 2500;
       
-      // Scale product to fit 80% of canvas height
       const targetHeight = Math.round(canvasHeight * 0.8);
       const scale = targetHeight / metadata.height;
       const targetWidth = Math.round(metadata.width * scale);
@@ -45,7 +38,6 @@ class ImageProcessor {
         .resize(targetWidth, targetHeight)
         .toBuffer();
 
-      // 6. Create final composition
       return await sharp({
         create: {
           width: canvasWidth,
@@ -62,7 +54,6 @@ class ImageProcessor {
       .toBuffer();
 
     } finally {
-      // Cleanup temp files
       await fs.unlink(tempInput).catch(() => {});
       await fs.unlink(tempOutput).catch(() => {});
     }
@@ -79,8 +70,6 @@ class ImageProcessor {
     });
   }
 
-  // --- HELPER FUNCTIONS REQUIRED BY INDEX.JS ---
-
   async getImageDimensions(buffer) {
     const metadata = await sharp(buffer).metadata();
     return { width: metadata.width, height: metadata.height };
@@ -95,5 +84,3 @@ class ImageProcessor {
     }
   }
 }
-
-export { ImageProcessor };
