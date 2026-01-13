@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import { ProductScaler } from './scaler.js';
 import fs from 'fs/promises';
+import { removeBackground as removeBackgroundAI } from '@imgly/background-removal-node';
 
 /**
  * Image Processor - Handles all image processing operations
@@ -203,27 +204,42 @@ export class ImageProcessor {
   }
 
   /**
-   * Basic background cleanup
-   * Note: Sharp has very limited background removal capabilities
-   * For proper background removal, consider using a service like remove.bg
+   * Remove background using AI model
+   * Uses @imgly/background-removal-node for high-quality background removal
    * @param {Buffer} buffer - Input image buffer
-   * @returns {Promise<Buffer>} Image with alpha channel
+   * @returns {Promise<Buffer>} Image with background removed (PNG with alpha)
    */
   async cleanupBackground(buffer) {
     try {
-      // Simply ensure alpha channel and trim transparent edges
-      // Sharp cannot actually remove complex backgrounds
-      const image = sharp(buffer);
+      console.log('Removing background with AI model...');
 
-      return await image
-        .ensureAlpha() // Ensure alpha channel exists
-        .trim() // Remove any existing transparent edges
-        .toBuffer();
+      // Use AI model to remove background
+      // First run will download ~50MB model (cached for future use)
+      const blob = await removeBackgroundAI(buffer);
+
+      // Convert Blob to Buffer
+      const arrayBuffer = await blob.arrayBuffer();
+      const resultBuffer = Buffer.from(arrayBuffer);
+
+      console.log('✓ Background removed successfully');
+      return resultBuffer;
 
     } catch (error) {
-      console.error('Error in cleanup:', error.message);
-      // Return original if cleanup fails
-      return buffer;
+      console.error('AI background removal failed:', error.message);
+      console.log('Falling back to basic cleanup...');
+
+      // Fallback to basic cleanup if AI fails
+      try {
+        const image = sharp(buffer);
+        return await image
+          .ensureAlpha()
+          .trim()
+          .toBuffer();
+      } catch (fallbackError) {
+        console.error('Fallback also failed:', fallbackError.message);
+        // Return original if everything fails
+        return buffer;
+      }
     }
   }
 
