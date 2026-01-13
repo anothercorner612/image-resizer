@@ -1,7 +1,14 @@
 import sharp from 'sharp';
 import { ProductScaler } from './scaler.js';
 import fs from 'fs/promises';
-import { removeBackground as removeBackgroundAI } from '@imgly/background-removal-node';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const execAsync = promisify(exec);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Image Processor - Handles all image processing operations
@@ -252,22 +259,49 @@ export class ImageProcessor {
   }
 
   /**
-   * Remove background using AI model
-   * Uses @imgly/background-removal-node for high-quality background removal
+   * Remove background using withoutbg Python tool
+   * Uses withoutbg via Python subprocess for high-quality background removal
    * @param {Buffer} buffer - Input image buffer
    * @returns {Promise<Buffer>} Image with background removed (PNG with alpha)
    */
   async cleanupBackground(buffer) {
+    const tempDir = path.join(__dirname, '..', 'temp');
+    const timestamp = Date.now();
+    const inputPath = path.join(tempDir, `input_${timestamp}.png`);
+    const outputPath = path.join(tempDir, `output_${timestamp}.png`);
+
     try {
-      console.log('Removing background with AI model...');
+      console.log('Removing background with withoutbg (Python)...');
 
-      // Use AI model to remove background
-      // First run will download ~50MB model (cached for future use)
-      const blob = await removeBackgroundAI(buffer);
+      // Create temp directory
+      await fs.mkdir(tempDir, { recursive: true });
 
-      // Convert Blob to Buffer
-      const arrayBuffer = await blob.arrayBuffer();
-      let resultBuffer = Buffer.from(arrayBuffer);
+      // Write buffer to temp file
+      await fs.writeFile(inputPath, buffer);
+
+      // Call Python script
+      const pythonScript = path.join(__dirname, '..', 'remove_bg.py');
+      const command = `python3 "${pythonScript}" "${inputPath}" "${outputPath}"`;
+
+      console.log('→ Executing Python background removal...');
+      console.log('  Note: First run downloads ~320MB models (one-time)');
+
+      const { stdout, stderr } = await execAsync(command, {
+        timeout: 120000, // 2 minute timeout
+        maxBuffer: 50 * 1024 * 1024 // 50MB buffer
+      });
+
+      // Log Python output
+      if (stderr) {
+        console.log(stderr.trim());
+      }
+
+      // Read result
+      let resultBuffer = await fs.readFile(outputPath);
+
+      // Clean up temp files
+      await fs.unlink(inputPath).catch(() => {});
+      await fs.unlink(outputPath).catch(() => {});
 
       // Smart edge trimming based on product color analysis
       console.log('Analyzing product for smart trimming...');
@@ -275,13 +309,13 @@ export class ImageProcessor {
 
       let trimThreshold;
       if (colorAnalysis.isWhiteProduct) {
-        trimThreshold = 10; // Conservative for white products (books, white cards)
+        trimThreshold = 5; // Very conservative for white products
         console.log(`→ White/light product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
         console.log(`  Using conservative trim (threshold: ${trimThreshold})`);
       } else {
-        trimThreshold = 60; // Very aggressive for colorful products to remove AI residue
+        trimThreshold = 15; // Moderate trim - withoutbg should have clean edges
         console.log(`→ Colorful product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
-        console.log(`  Using very aggressive trim (threshold: ${trimThreshold})`);
+        console.log(`  Using moderate trim (threshold: ${trimThreshold})`);
       }
 
       try {
@@ -305,14 +339,18 @@ export class ImageProcessor {
         console.log('Edge trimming skipped:', trimError.message);
       }
 
-      console.log('✓ Background removed successfully');
+      console.log('✓ Background removed successfully with withoutbg');
       return resultBuffer;
 
     } catch (error) {
-      console.error('AI background removal failed:', error.message);
+      console.error('withoutbg background removal failed:', error.message);
       console.log('Falling back to basic cleanup...');
 
-      // Fallback to basic cleanup if AI fails
+      // Clean up temp files on error
+      await fs.unlink(inputPath).catch(() => {});
+      await fs.unlink(outputPath).catch(() => {});
+
+      // Fallback to basic cleanup if Python fails
       try {
         const image = sharp(buffer);
         return await image
