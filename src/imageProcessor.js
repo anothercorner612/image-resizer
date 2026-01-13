@@ -230,28 +230,28 @@ export class ImageProcessor {
       const arrayBuffer = await blob.arrayBuffer();
       let resultBuffer = Buffer.from(arrayBuffer);
 
-      // Trim transparent edges left by AI (but preserve white product content)
-      // This removes fully transparent borders without touching white products
-      console.log('Trimming transparent edges...');
+      // Aggressively trim semi-transparent white edges left by AI
+      // Use high threshold since AI has already separated product from background
+      console.log('Trimming semi-transparent edges...');
       try {
         const trimmed = await sharp(resultBuffer)
           .trim({
-            threshold: 1, // Very low threshold - only removes fully transparent pixels
-            lineArt: true // Better for preserving product edges
+            threshold: 35 // Aggressive - removes near-white and semi-transparent pixels
           })
           .toBuffer();
 
         const originalMeta = await sharp(resultBuffer).metadata();
         const trimmedMeta = await sharp(trimmed).metadata();
 
-        // Apply if it actually trimmed something
-        if ((originalMeta.width - trimmedMeta.width) > 0 ||
-            (originalMeta.height - trimmedMeta.height) > 0) {
+        if ((originalMeta.width - trimmedMeta.width) > 5 ||
+            (originalMeta.height - trimmedMeta.height) > 5) {
           console.log(`✓ Trimmed ${originalMeta.width - trimmedMeta.width}px width, ${originalMeta.height - trimmedMeta.height}px height`);
           resultBuffer = trimmed;
+        } else {
+          console.log('No significant edges to trim');
         }
       } catch (trimError) {
-        console.log('Transparent edge trim skipped');
+        console.log('Edge trimming skipped:', trimError.message);
       }
 
       console.log('✓ Background removed successfully');
