@@ -279,9 +279,9 @@ export class ImageProcessor {
         console.log(`→ White/light product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
         console.log(`  Using conservative trim (threshold: ${trimThreshold})`);
       } else {
-        trimThreshold = 45; // Aggressive for colorful products
+        trimThreshold = 60; // Very aggressive for colorful products to remove AI residue
         console.log(`→ Colorful product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
-        console.log(`  Using aggressive trim (threshold: ${trimThreshold})`);
+        console.log(`  Using very aggressive trim (threshold: ${trimThreshold})`);
       }
 
       try {
