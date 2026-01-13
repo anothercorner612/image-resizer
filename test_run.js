@@ -1,14 +1,14 @@
-dotenv.config();
-console.log('--- ENV CHECK ---');
-console.log('Store URL:', process.env.SHOPIFY_STORE_URL ? 'FOUND' : 'MISSING');
-console.log('Token:', process.env.SHOPIFY_ACCESS_TOKEN ? 'FOUND' : 'MISSING');
-console.log('-----------------');
-
 import sharp from 'sharp';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+
+dotenv.config();
+console.log('--- ENV CHECK ---');
+console.log('Store URL:', process.env.SHOPIFY_STORE_URL ? 'FOUND' : 'MISSING');
+console.log('Token:', process.env.SHOPIFY_ACCESS_TOKEN ? 'FOUND' : 'MISSING');
+console.log('-----------------');
 
 // Standard fix for __dirname in ES Modules
 const __filename = fileURLToPath(import.meta.url);
