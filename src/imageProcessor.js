@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import { ProductScaler } from './scaler.js';
 import fs from 'fs/promises';
+import Replicate from 'replicate';
 
 /**
  * Image Processor - Handles all image processing operations
@@ -186,87 +187,78 @@ export class ImageProcessor {
   }
 
   /**
-   * Remove background using Sharp's built-in features
-   * Multi-strategy approach for different background types
+   * Remove background using Replicate's rembg API
+   * High-quality AI-powered background removal
    * @param {Buffer} buffer - Input image buffer
    * @returns {Promise<Buffer>} Image with background removed (PNG with alpha)
    */
   async cleanupBackground(buffer) {
+    // If Replicate API key is configured, use AI removal
+    if (process.env.REPLICATE_API_TOKEN) {
+      try {
+        console.log('Removing background with Replicate AI...');
+
+        const replicate = new Replicate({
+          auth: process.env.REPLICATE_API_TOKEN,
+        });
+
+        // Convert buffer to base64 data URI
+        const base64Image = `data:image/png;base64,${buffer.toString('base64')}`;
+
+        // Run the rembg model
+        const output = await replicate.run(
+          "cjwbw/rembg:fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003",
+          {
+            input: {
+              image: base64Image
+            }
+          }
+        );
+
+        // Output is a URL to the processed image
+        if (output) {
+          console.log('Downloading AI-processed image...');
+          const axios = (await import('axios')).default;
+          const response = await axios.get(output, { responseType: 'arraybuffer' });
+          const resultBuffer = Buffer.from(response.data);
+          console.log('✓ Background removed successfully with AI');
+          return resultBuffer;
+        }
+
+        throw new Error('No output from Replicate API');
+
+      } catch (error) {
+        console.warn('Replicate API failed, falling back to basic processing:', error.message);
+        // Fall through to fallback
+      }
+    } else {
+      console.log('REPLICATE_API_TOKEN not configured, using basic processing');
+    }
+
+    // Fallback: Basic Sharp processing
     try {
-      console.log('Removing background...');
       const image = sharp(buffer);
       const metadata = await image.metadata();
 
-      // Strategy 1: Try removing solid white/light backgrounds
-      try {
-        // Remove near-white backgrounds (product photos often have off-white backgrounds)
-        const removed = await sharp(buffer)
-          .removeAlpha() // Start fresh
-          .flatten({ background: { r: 255, g: 255, b: 255 } }) // Flatten to white
-          .trim({ threshold: 10, background: { r: 255, g: 255, b: 255 } }) // Trim white edges
-          .toBuffer();
-
-        const removedMeta = await sharp(removed).metadata();
-
-        // If trimming removed significant area, we found a white background
-        const areaRemoved = (metadata.width * metadata.height) - (removedMeta.width * removedMeta.height);
-        const percentRemoved = (areaRemoved / (metadata.width * metadata.height)) * 100;
-
-        if (percentRemoved > 5) {
-          console.log(`✓ Removed white background (${percentRemoved.toFixed(1)}% trimmed)`);
-
-          // Now make the white areas transparent
-          const transparent = await sharp(removed)
-            .ensureAlpha()
-            .raw()
-            .toBuffer({ resolveWithObject: true });
-
-          // Create a mask where white pixels become transparent
-          const { data, info } = transparent;
-          for (let i = 0; i < data.length; i += info.channels) {
-            const r = data[i];
-            const g = data[i + 1];
-            const b = data[i + 2];
-
-            // If pixel is near-white, make it transparent
-            if (r > 240 && g > 240 && b > 240) {
-              data[i + 3] = 0; // Set alpha to 0
-            }
-          }
-
-          return await sharp(data, {
-            raw: {
-              width: info.width,
-              height: info.height,
-              channels: info.channels
-            }
-          })
-          .png()
-          .toBuffer();
-        }
-      } catch (e) {
-        // Strategy 1 failed, continue to strategy 2
-      }
-
-      // Strategy 2: Check if image already has transparency
+      // If image already has transparency, just trim edges
       if (metadata.hasAlpha) {
-        console.log('✓ Image already has alpha channel');
+        console.log('Image already has alpha channel, trimming edges');
         return await sharp(buffer)
-          .trim({ threshold: 5 }) // Just trim edges
+          .trim({ threshold: 5 })
           .ensureAlpha()
           .toBuffer();
       }
 
-      // Strategy 3: Basic trim and add alpha
-      console.log('Adding transparency...');
+      // Otherwise, add alpha channel and trim
+      console.log('Adding alpha channel');
       return await sharp(buffer)
         .ensureAlpha()
         .trim({ threshold: 10 })
         .toBuffer();
 
     } catch (error) {
-      console.warn('Background removal partially failed:', error.message);
-      // Return original with alpha channel added
+      console.warn('Basic processing failed:', error.message);
+      // Last resort: return original with alpha
       try {
         return await sharp(buffer).ensureAlpha().toBuffer();
       } catch (fallbackError) {
