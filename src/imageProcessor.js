@@ -29,7 +29,7 @@ export class ImageProcessor {
     if (this.enableBackgroundRemoval) {
       console.log('Initializing AI background removal pipeline...');
       this.bgRemovalPipeline = new BGRMPipeline({
-        onnxModelProfile: BGRMPipeline.ONNX_MODEL_PROFILE.U2NET,
+        onnxModelProfile: BGRMPipeline.ONNX_MODEL_PROFILES.U2NET,
         dither: BGRMPipeline.NATIVE_DITHER
       });
       console.log('✓ Background removal ready (using U2Net model)');
@@ -215,26 +215,27 @@ export class ImageProcessor {
     try {
       console.log('Removing background with local AI (U2Net)...');
 
-      // Create temp directory if it doesn't exist
+      // Create temp directories if they don't exist
       const tempDir = './temp';
-      try {
-        await fs.mkdir(tempDir, { recursive: true });
-      } catch (e) {
-        // Directory exists, continue
-      }
-
-      // Generate unique temp filenames
       const timestamp = Date.now();
-      const tempInput = `${tempDir}/input_${timestamp}.png`;
-      const tempOutput = `${tempDir}/output_${timestamp}.png`;
+      const inputDir = `${tempDir}/input_${timestamp}`;
+      const outputDir = `${tempDir}/output_${timestamp}`;
+
+      await fs.mkdir(inputDir, { recursive: true });
+      await fs.mkdir(outputDir, { recursive: true });
+
+      // Generate temp filename
+      const filename = 'image.png';
+      const tempInput = `${inputDir}/${filename}`;
+      const tempOutput = `${outputDir}/${filename}`;
 
       try {
         // Save buffer to temp file
         await fs.writeFile(tempInput, buffer);
 
         // Process with free-background-remover
-        // Note: run() processes a single file and returns when complete
-        await this.bgRemovalPipeline.run(tempInput, tempOutput);
+        // Note: run() takes an input path (or glob) and an output directory
+        await this.bgRemovalPipeline.run(tempInput, outputDir);
 
         // Read result
         const resultBuffer = await fs.readFile(tempOutput);
@@ -243,10 +244,10 @@ export class ImageProcessor {
         return resultBuffer;
 
       } finally {
-        // Clean up temp files
+        // Clean up temp directories and files
         try {
-          await fs.unlink(tempInput).catch(() => {});
-          await fs.unlink(tempOutput).catch(() => {});
+          await fs.rm(inputDir, { recursive: true, force: true }).catch(() => {});
+          await fs.rm(outputDir, { recursive: true, force: true }).catch(() => {});
         } catch (cleanupError) {
           // Ignore cleanup errors
         }
