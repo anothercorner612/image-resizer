@@ -39,17 +39,18 @@ class TestRunner {
 
   /**
    * Main test execution
+   * @param {number} perCategory - Number of examples per category (default: 3)
    */
-  async run() {
+  async run(perCategory = 3) {
     try {
-      console.log('=== Test Run: Finding Category Examples ===\n');
+      console.log(`=== Test Run: Finding ${perCategory} Examples Per Category ===\n`);
 
       // Create output directory
       await fs.mkdir(this.outputDir, { recursive: true });
 
       // 1. Find examples
       console.log('Finding example products...');
-      const examples = await this.findExamples();
+      const examples = await this.findExamples(perCategory);
 
       if (examples.length === 0) {
         console.log('No example products found!');
@@ -66,6 +67,7 @@ class TestRunner {
 
       console.log('\n✓ Test run complete!');
       console.log(`Open comparison.html in your browser to review results.`);
+      console.log(`Total products tested: ${results.length}`);
 
     } catch (error) {
       console.error('Test run failed:', error);
@@ -74,18 +76,26 @@ class TestRunner {
   }
 
   /**
-   * Find one example product of each category
+   * Find example products - multiple per category for better testing
+   * @param {number} perCategory - Number of examples per category (default: 3)
    * @returns {Promise<Array>} Array of example products
    */
-  async findExamples() {
+  async findExamples(perCategory = 3) {
     const allProducts = await this.shopify.getAllProducts();
     const examples = [];
-    const foundCategories = new Set();
+    const categoryCount = {
+      tall_thin: 0,
+      wide: 0,
+      small_accessory: 0,
+      default: 0
+    };
 
-    console.log(`Scanning ${allProducts.length} products...`);
+    console.log(`Scanning ${allProducts.length} products for ${perCategory} examples per category...`);
 
     for (const product of allProducts) {
-      if (foundCategories.size === this.categories.length) {
+      // Check if we have enough examples for all categories
+      const allCategoriesFull = Object.values(categoryCount).every(count => count >= perCategory);
+      if (allCategoriesFull) {
         break;
       }
 
@@ -109,9 +119,9 @@ class TestRunner {
           product.product_type
         );
 
-        // Add if we haven't found this category yet
-        if (!foundCategories.has(category)) {
-          foundCategories.add(category);
+        // Add if we need more examples of this category
+        if (categoryCount[category] < perCategory) {
+          categoryCount[category]++;
           examples.push({
             product,
             image,
@@ -119,7 +129,7 @@ class TestRunner {
             category,
             buffer
           });
-          console.log(`✓ Found ${category}: ${product.title}`);
+          console.log(`✓ Found ${category} (${categoryCount[category]}/${perCategory}): ${product.title}`);
         }
 
       } catch (error) {
@@ -127,7 +137,10 @@ class TestRunner {
       }
     }
 
-    console.log(`\nFound ${examples.length} example(s) across ${foundCategories.size} categories`);
+    console.log(`\nFound ${examples.length} total examples:`);
+    Object.entries(categoryCount).forEach(([cat, count]) => {
+      console.log(`  ${cat}: ${count}`);
+    });
     return examples;
   }
 
@@ -345,15 +358,59 @@ class TestRunner {
       <label><input type="checkbox"> WebP format with good quality</label>
     </div>
 
-    <div class="comparison-grid">
-      ${results.map(result => this.generateComparisonCard(result)).join('\n')}
-    </div>
+    ${this.generateCategoryGroups(results)}
   </div>
 </body>
 </html>`;
 
     await fs.writeFile('./comparison.html', html);
     console.log('✓ Generated comparison.html');
+  }
+
+  /**
+   * Generate category groups for better organization
+   * @param {Array} results - All processing results
+   * @returns {string} HTML string
+   */
+  generateCategoryGroups(results) {
+    // Group results by category
+    const grouped = {
+      tall_thin: [],
+      wide: [],
+      small_accessory: [],
+      default: []
+    };
+
+    results.forEach(result => {
+      if (grouped[result.category]) {
+        grouped[result.category].push(result);
+      }
+    });
+
+    // Generate HTML for each category
+    const categoryNames = {
+      tall_thin: 'Tall/Thin Products',
+      wide: 'Wide Products',
+      small_accessory: 'Small/Accessory Products',
+      default: 'Default Products'
+    };
+
+    let html = '';
+    Object.entries(grouped).forEach(([category, items]) => {
+      if (items.length > 0) {
+        html += `
+    <div style="margin-top: 40px;">
+      <h2 style="font-size: 24px; margin-bottom: 20px; color: #333; padding: 0 20px;">
+        ${categoryNames[category]} (${items.length})
+      </h2>
+      <div class="comparison-grid">
+        ${items.map(result => this.generateComparisonCard(result)).join('\n')}
+      </div>
+    </div>`;
+      }
+    });
+
+    return html;
   }
 
   /**
@@ -428,9 +485,43 @@ class TestRunner {
   }
 }
 
+// Parse command line arguments
+const args = process.argv.slice(2);
+let perCategory = 3; // default
+
+// Check for --count or -c flag
+const countIndex = args.findIndex(arg => arg === '--count' || arg === '-c');
+if (countIndex !== -1 && args[countIndex + 1]) {
+  perCategory = parseInt(args[countIndex + 1]);
+  if (isNaN(perCategory) || perCategory < 1) {
+    console.error('Error: --count must be a positive number');
+    process.exit(1);
+  }
+}
+
+// Show usage help
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(`
+Test Runner - Process multiple examples per category
+
+Usage:
+  npm test                    # Process 3 examples per category (default)
+  npm test -- --count 5       # Process 5 examples per category
+  npm test -- -c 10           # Process 10 examples per category
+
+This will:
+  - Find N products from each category (tall_thin, wide, small_accessory, default)
+  - Process them locally (no upload to Shopify)
+  - Generate comparison.html for visual review
+  - Save all examples to output/ directory
+  `);
+  process.exit(0);
+}
+
 // Run test
+console.log(`Using ${perCategory} examples per category\n`);
 const runner = new TestRunner();
-runner.run().catch(error => {
+runner.run(perCategory).catch(error => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
