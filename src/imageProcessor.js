@@ -213,6 +213,45 @@ export class ImageProcessor {
   }
 
   /**
+   * Analyze if product is predominantly white/light colored
+   * Used to decide trim aggressiveness
+   * @param {Buffer} buffer - Image buffer with transparent background
+   * @returns {Promise<Object>} Analysis result with isWhiteProduct flag and stats
+   */
+  async analyzeProductColor(buffer) {
+    try {
+      const stats = await sharp(buffer).stats();
+
+      // Get average RGB values across all channels (excluding alpha)
+      const channels = stats.channels.slice(0, 3); // RGB only
+      const avgR = channels[0].mean;
+      const avgG = channels[1].mean;
+      const avgB = channels[2].mean;
+
+      // Calculate overall brightness (0-255)
+      const brightness = (avgR + avgG + avgB) / 3;
+
+      // Calculate color saturation (how colorful vs grayscale)
+      const maxChannel = Math.max(avgR, avgG, avgB);
+      const minChannel = Math.min(avgR, avgG, avgB);
+      const saturation = maxChannel - minChannel;
+
+      // White/light products are: bright (>200) AND low saturation (<30)
+      const isWhiteProduct = brightness > 200 && saturation < 30;
+
+      return {
+        isWhiteProduct,
+        brightness: Math.round(brightness),
+        saturation: Math.round(saturation),
+        avgColor: { r: Math.round(avgR), g: Math.round(avgG), b: Math.round(avgB) }
+      };
+    } catch (error) {
+      console.log('Color analysis failed, using default trim');
+      return { isWhiteProduct: false, brightness: 128, saturation: 50 };
+    }
+  }
+
+  /**
    * Remove background using AI model
    * Uses @imgly/background-removal-node for high-quality background removal
    * @param {Buffer} buffer - Input image buffer
@@ -230,25 +269,37 @@ export class ImageProcessor {
       const arrayBuffer = await blob.arrayBuffer();
       let resultBuffer = Buffer.from(arrayBuffer);
 
-      // Aggressively trim semi-transparent white edges left by AI
-      // Use high threshold since AI has already separated product from background
-      console.log('Trimming semi-transparent edges...');
+      // Smart edge trimming based on product color analysis
+      console.log('Analyzing product for smart trimming...');
+      const colorAnalysis = await this.analyzeProductColor(resultBuffer);
+
+      let trimThreshold;
+      if (colorAnalysis.isWhiteProduct) {
+        trimThreshold = 10; // Conservative for white products (books, white cards)
+        console.log(`→ White/light product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
+        console.log(`  Using conservative trim (threshold: ${trimThreshold})`);
+      } else {
+        trimThreshold = 45; // Aggressive for colorful products
+        console.log(`→ Colorful product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
+        console.log(`  Using aggressive trim (threshold: ${trimThreshold})`);
+      }
+
       try {
         const trimmed = await sharp(resultBuffer)
           .trim({
-            threshold: 35 // Aggressive - removes near-white and semi-transparent pixels
+            threshold: trimThreshold
           })
           .toBuffer();
 
         const originalMeta = await sharp(resultBuffer).metadata();
         const trimmedMeta = await sharp(trimmed).metadata();
 
-        if ((originalMeta.width - trimmedMeta.width) > 5 ||
-            (originalMeta.height - trimmedMeta.height) > 5) {
+        if ((originalMeta.width - trimmedMeta.width) > 0 ||
+            (originalMeta.height - trimmedMeta.height) > 0) {
           console.log(`✓ Trimmed ${originalMeta.width - trimmedMeta.width}px width, ${originalMeta.height - trimmedMeta.height}px height`);
           resultBuffer = trimmed;
         } else {
-          console.log('No significant edges to trim');
+          console.log('No edges to trim');
         }
       } catch (trimError) {
         console.log('Edge trimming skipped:', trimError.message);
