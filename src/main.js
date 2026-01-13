@@ -24,7 +24,7 @@ export class ShopifyImageAutomation {
       dryRun: config.dryRun !== undefined ? config.dryRun : process.env.DRY_RUN === 'true',
       maxConcurrent: config.maxConcurrent || process.env.MAX_CONCURRENT_PROCESSES || 5,
       enableAutoTrim: config.enableAutoTrim !== undefined ? config.enableAutoTrim : process.env.ENABLE_AUTO_TRIM !== 'false',
-      enableBackgroundRemoval: config.enableBackgroundRemoval !== undefined ? config.enableBackgroundRemoval : process.env.ENABLE_BACKGROUND_REMOVAL === 'true',
+      enableBackgroundRemoval: config.enableBackgroundRemoval !== undefined ? config.enableBackgroundRemoval : process.env.ENABLE_BACKGROUND_REMOVAL !== 'false',
     };
 
     // Validate configuration
