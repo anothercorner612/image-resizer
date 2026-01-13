@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/main.js",
-    "test": "node test_run.js"
+    "test": "node test_run.js",
+    "diagnose": "node diagnose.js"
   },
   "keywords": [
     "shopify",
