@@ -3,16 +3,20 @@ import path from 'path';
 import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import * as dotenv from 'dotenv';
 
+// Initialize environment variables
 dotenv.config();
-console.log('--- ENV CHECK ---');
-console.log('Store URL:', process.env.SHOPIFY_STORE_URL ? 'FOUND' : 'MISSING');
-console.log('Token:', process.env.SHOPIFY_ACCESS_TOKEN ? 'FOUND' : 'MISSING');
-console.log('-----------------');
 
 // Standard fix for __dirname in ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Initial Debug Check
+console.log('--- ENV CHECK (Processor) ---');
+console.log('Store URL:', process.env.SHOPIFY_STORE_URL ? 'FOUND' : 'MISSING');
+console.log('Token:', process.env.SHOPIFY_ACCESS_TOKEN ? 'FOUND' : 'MISSING');
+console.log('-----------------------------');
 
 export class ImageProcessor {
   constructor(config) {
@@ -84,7 +88,7 @@ export class ImageProcessor {
       };
 
     } finally {
-      // Cleanup
+      // Cleanup temp files
       await fs.unlink(tempInput).catch(() => {});
       await fs.unlink(tempOutput).catch(() => {});
     }
@@ -93,7 +97,10 @@ export class ImageProcessor {
   runPythonRemoveBg(input, output) {
     return new Promise((resolve, reject) => {
       const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
+      
+      // Log errors from Python
       py.stderr.on('data', (data) => console.error(`Python: ${data}`));
+      
       py.on('close', (code) => {
         if (code === 0) resolve();
         else reject(new Error(`Python script failed with code ${code}`));
