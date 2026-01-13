@@ -61,10 +61,13 @@ export class ImageProcessor {
       let processedProduct;
 
       if (this.enableBackgroundRemoval && !metadata.hasAlpha) {
-        console.log('⚠️  Note: Basic background cleanup applied (Sharp has limited background removal)');
+        console.log('Removing background with AI model...');
         processedProduct = await this.cleanupBackground(workingBuffer);
+      } else if (metadata.hasAlpha) {
+        console.log('Image already has transparency, skipping background removal');
+        processedProduct = await sharp(workingBuffer).ensureAlpha().toBuffer();
       } else {
-        // Use image as-is, just ensure alpha channel
+        console.log('Background removal disabled, using original image');
         processedProduct = await sharp(workingBuffer).ensureAlpha().toBuffer();
       }
 

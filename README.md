@@ -328,9 +328,11 @@ The system respects Shopify API rate limits:
 - Ensure store URL is correct format (your-store.myshopify.com)
 
 **"Background removal not working"**
-- Sharp's built-in background removal has limitations
-- May need to integrate with remove.bg API or similar service
-- Products with complex backgrounds may need manual review
+- Ensure first run has internet access to download AI model (~50MB)
+- Model is cached in ~/.cache/background-removal/ for future use
+- Check ENABLE_BACKGROUND_REMOVAL=true in .env
+- Review console logs for specific error messages
+- AI model may struggle with very complex backgrounds - manual review recommended
 
 **"Images look wrong in comparison.html"**
 - Check canvas dimensions match specifications
