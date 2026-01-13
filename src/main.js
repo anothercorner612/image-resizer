@@ -20,7 +20,7 @@ export class ShopifyImageAutomation {
       canvasHeight: config.canvasHeight || process.env.CANVAS_HEIGHT || 2500,
       backgroundColor: config.backgroundColor || process.env.BACKGROUND_COLOR || '#f3f3f4',
       shadowOpacity: config.shadowOpacity || process.env.SHADOW_OPACITY || 0.18,
-      webpQuality: config.webpQuality || 90,
+      webpQuality: config.webpQuality || process.env.WEBP_QUALITY || 90,
       dryRun: config.dryRun !== undefined ? config.dryRun : process.env.DRY_RUN === 'true',
       maxConcurrent: config.maxConcurrent || process.env.MAX_CONCURRENT_PROCESSES || 5,
       enableAutoTrim: config.enableAutoTrim !== undefined ? config.enableAutoTrim : process.env.ENABLE_AUTO_TRIM !== 'false',
