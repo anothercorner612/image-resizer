@@ -1,7 +1,11 @@
 import sharp from 'sharp';
 import { ProductScaler } from './scaler.js';
 import fs from 'fs/promises';
-import Replicate from 'replicate';
+import { createRequire } from 'module';
+
+// free-background-remover is CommonJS, need to use require
+const require = createRequire(import.meta.url);
+const BGRMPipeline = require('free-background-remover');
 
 /**
  * Image Processor - Handles all image processing operations
@@ -20,6 +24,16 @@ export class ImageProcessor {
     this.enableBackgroundRemoval = config.enableBackgroundRemoval !== false; // default: true
 
     this.scaler = new ProductScaler(this.canvasWidth, this.canvasHeight);
+
+    // Initialize background removal pipeline (reuse for batch processing)
+    if (this.enableBackgroundRemoval) {
+      console.log('Initializing AI background removal pipeline...');
+      this.bgRemovalPipeline = new BGRMPipeline({
+        onnxModelProfile: BGRMPipeline.ONNX_MODEL_PROFILE.U2NET,
+        dither: BGRMPipeline.NATIVE_DITHER
+      });
+      console.log('✓ Background removal ready (using U2Net model)');
+    }
   }
 
   /**
@@ -187,83 +201,90 @@ export class ImageProcessor {
   }
 
   /**
-   * Remove background using Replicate's rembg API
-   * High-quality AI-powered background removal
+   * Remove background using local AI (U2Net model via free-background-remover)
+   * High-quality AI-powered background removal with no API costs
    * @param {Buffer} buffer - Input image buffer
    * @returns {Promise<Buffer>} Image with background removed (PNG with alpha)
    */
   async cleanupBackground(buffer) {
-    // If Replicate API key is configured, use AI removal
-    if (process.env.REPLICATE_API_TOKEN) {
-      try {
-        console.log('Removing background with Replicate AI...');
-
-        const replicate = new Replicate({
-          auth: process.env.REPLICATE_API_TOKEN,
-        });
-
-        // Convert buffer to base64 data URI
-        const base64Image = `data:image/png;base64,${buffer.toString('base64')}`;
-
-        // Run the rembg model
-        const output = await replicate.run(
-          "cjwbw/rembg:fb8af171cfa1616ddcf1242c093f9c46bcada5ad4cf6f2fbe8b81b330ec5c003",
-          {
-            input: {
-              image: base64Image
-            }
-          }
-        );
-
-        // Output is a URL to the processed image
-        if (output) {
-          console.log('Downloading AI-processed image...');
-          const axios = (await import('axios')).default;
-          const response = await axios.get(output, { responseType: 'arraybuffer' });
-          const resultBuffer = Buffer.from(response.data);
-          console.log('✓ Background removed successfully with AI');
-          return resultBuffer;
-        }
-
-        throw new Error('No output from Replicate API');
-
-      } catch (error) {
-        console.warn('Replicate API failed, falling back to basic processing:', error.message);
-        // Fall through to fallback
-      }
-    } else {
-      console.log('REPLICATE_API_TOKEN not configured, using basic processing');
+    if (!this.bgRemovalPipeline) {
+      console.log('Background removal disabled, using original image');
+      return await sharp(buffer).ensureAlpha().toBuffer();
     }
 
-    // Fallback: Basic Sharp processing
     try {
-      const image = sharp(buffer);
-      const metadata = await image.metadata();
+      console.log('Removing background with local AI (U2Net)...');
 
-      // If image already has transparency, just trim edges
-      if (metadata.hasAlpha) {
-        console.log('Image already has alpha channel, trimming edges');
-        return await sharp(buffer)
-          .trim({ threshold: 5 })
-          .ensureAlpha()
-          .toBuffer();
+      // Create temp directory if it doesn't exist
+      const tempDir = './temp';
+      try {
+        await fs.mkdir(tempDir, { recursive: true });
+      } catch (e) {
+        // Directory exists, continue
       }
 
-      // Otherwise, add alpha channel and trim
-      console.log('Adding alpha channel');
-      return await sharp(buffer)
-        .ensureAlpha()
-        .trim({ threshold: 10 })
-        .toBuffer();
+      // Generate unique temp filenames
+      const timestamp = Date.now();
+      const tempInput = `${tempDir}/input_${timestamp}.png`;
+      const tempOutput = `${tempDir}/output_${timestamp}.png`;
+
+      try {
+        // Save buffer to temp file
+        await fs.writeFile(tempInput, buffer);
+
+        // Process with free-background-remover
+        // Note: run() processes a single file and returns when complete
+        await this.bgRemovalPipeline.run(tempInput, tempOutput);
+
+        // Read result
+        const resultBuffer = await fs.readFile(tempOutput);
+        console.log('✓ Background removed successfully with local AI');
+
+        return resultBuffer;
+
+      } finally {
+        // Clean up temp files
+        try {
+          await fs.unlink(tempInput).catch(() => {});
+          await fs.unlink(tempOutput).catch(() => {});
+        } catch (cleanupError) {
+          // Ignore cleanup errors
+        }
+      }
 
     } catch (error) {
-      console.warn('Basic processing failed:', error.message);
-      // Last resort: return original with alpha
+      console.warn('Local AI background removal failed, falling back to basic processing:', error.message);
+
+      // Fallback: Basic Sharp processing
       try {
-        return await sharp(buffer).ensureAlpha().toBuffer();
+        const image = sharp(buffer);
+        const metadata = await image.metadata();
+
+        // If image already has transparency, just trim edges
+        if (metadata.hasAlpha) {
+          console.log('Image already has alpha channel, trimming edges');
+          return await sharp(buffer)
+            .trim({ threshold: 5 })
+            .ensureAlpha()
+            .toBuffer();
+        }
+
+        // Otherwise, add alpha channel and trim
+        console.log('Adding alpha channel');
+        return await sharp(buffer)
+          .ensureAlpha()
+          .trim({ threshold: 10 })
+          .toBuffer();
+
       } catch (fallbackError) {
-        console.error('Complete fallback failed:', fallbackError.message);
-        return buffer;
+        console.warn('Basic processing failed:', fallbackError.message);
+        // Last resort: return original with alpha
+        try {
+          return await sharp(buffer).ensureAlpha().toBuffer();
+        } catch (lastError) {
+          console.error('Complete fallback failed:', lastError.message);
+          return buffer;
+        }
       }
     }
   }
