@@ -14,6 +14,10 @@ export class ImageProcessor {
     this.shadowOpacity = parseFloat(config.shadowOpacity) || 0.18;
     this.webpQuality = parseInt(config.webpQuality) || 90;
 
+    // Optional features (can be disabled via config)
+    this.enableAutoTrim = config.enableAutoTrim !== false; // default: true
+    this.enableBackgroundRemoval = config.enableBackgroundRemoval !== false; // default: true
+
     this.scaler = new ProductScaler(this.canvasWidth, this.canvasHeight);
   }
 
@@ -27,12 +31,18 @@ export class ImageProcessor {
     try {
       console.log('\n=== Processing Image ===');
 
-      // 1. Auto-trim black bars and letterboxing
-      console.log('Auto-trimming letterboxing/black bars...');
-      const trimmedBuffer = await this.autoTrim(buffer);
+      let workingBuffer = buffer;
+
+      // 1. Auto-trim black bars and letterboxing (optional)
+      if (this.enableAutoTrim) {
+        console.log('Auto-trimming letterboxing/black bars...');
+        workingBuffer = await this.autoTrim(workingBuffer);
+      } else {
+        console.log('Auto-trim disabled, using original image');
+      }
 
       // 2. Load image and get metadata
-      const image = sharp(trimmedBuffer);
+      const image = sharp(workingBuffer);
       const metadata = await image.metadata();
       console.log(`Original dimensions: ${metadata.width}×${metadata.height}`);
 
@@ -45,9 +55,19 @@ export class ImageProcessor {
       );
       this.scaler.logScalingInfo(scalingInfo);
 
-      // 4. Remove background and resize
-      console.log('Removing background and resizing...');
-      const processedProduct = await this.removeBackground(trimmedBuffer);
+      // 4. Prepare product image (with or without background removal)
+      console.log('Preparing product image...');
+      let processedProduct;
+
+      if (this.enableBackgroundRemoval && !metadata.hasAlpha) {
+        console.log('⚠️  Note: Basic background cleanup applied (Sharp has limited background removal)');
+        processedProduct = await this.cleanupBackground(workingBuffer);
+      } else {
+        // Use image as-is, just ensure alpha channel
+        processedProduct = await sharp(workingBuffer).ensureAlpha().toBuffer();
+      }
+
+      // 5. Resize
       const resizedProduct = await sharp(processedProduct)
         .resize(scalingInfo.scaled.width, scalingInfo.scaled.height, {
           fit: 'contain',
@@ -55,24 +75,24 @@ export class ImageProcessor {
         })
         .toBuffer();
 
-      // 5. Create canvas with background color
+      // 6. Create canvas with background color
       console.log('Creating canvas with background...');
       const canvas = await this.createCanvas();
 
-      // 6. Generate contact shadow
+      // 7. Generate contact shadow
       console.log('Generating contact shadow...');
       const shadowBuffer = await this.createContactShadow(
         scalingInfo.scaled.width,
         scalingInfo.scaled.height
       );
 
-      // 7. Get positioning
+      // 8. Get positioning
       const centerPos = this.scaler.getCenterPosition(
         scalingInfo.scaled.width,
         scalingInfo.scaled.height
       );
 
-      // 8. Composite everything together
+      // 9. Composite everything together
       console.log('Compositing layers...');
       const finalImage = await sharp(canvas)
         .composite([
@@ -116,6 +136,7 @@ export class ImageProcessor {
   /**
    * Auto-trim black bars and letterboxing from images
    * Removes solid black or white borders before processing
+   * More conservative to avoid removing actual product content
    * @param {Buffer} buffer - Input image buffer
    * @returns {Promise<Buffer>} Trimmed image buffer
    */
@@ -124,47 +145,52 @@ export class ImageProcessor {
       const image = sharp(buffer);
       const metadata = await image.metadata();
 
-      // Try trimming with threshold for black/white borders
-      // threshold: difference from edge pixel (0-100)
-      // background: color to trim (black by default)
+      // Try trimming with threshold for black borders only
+      // Use lower threshold (2 instead of 10) to be more conservative
+      // Only trim if it's truly solid black/white
       let trimmedBuffer = await image
         .trim({
-          threshold: 10, // Allow slight variation in color
+          threshold: 2, // Very conservative - only pure black/white
           background: { r: 0, g: 0, b: 0 } // Trim black
         })
         .toBuffer();
 
-      // Check if trimming actually removed something
+      // Check if trimming actually removed significant borders
+      // Require at least 50px removed to prevent accidental trimming of content
       const trimmedMetadata = await sharp(trimmedBuffer).metadata();
       const trimmedSignificantly = (
-        (metadata.width - trimmedMetadata.width) > 10 ||
-        (metadata.height - trimmedMetadata.height) > 10
+        (metadata.width - trimmedMetadata.width) > 50 ||
+        (metadata.height - trimmedMetadata.height) > 50
       );
 
       if (trimmedSignificantly) {
         console.log(`✓ Trimmed black bars: ${metadata.width}×${metadata.height} → ${trimmedMetadata.width}×${trimmedMetadata.height}`);
         buffer = trimmedBuffer;
+      } else {
+        console.log('No significant black borders detected');
       }
 
-      // Also try trimming white borders
+      // Also try trimming white borders (only if significant)
+      const currentMetadata = await sharp(buffer).metadata();
       trimmedBuffer = await sharp(buffer)
         .trim({
-          threshold: 10,
+          threshold: 2,
           background: { r: 255, g: 255, b: 255 } // Trim white
         })
         .toBuffer();
 
-      // Check if white trimming removed something
+      // Check if white trimming removed something significant
       const whiteMetadata = await sharp(trimmedBuffer).metadata();
-      const currentMetadata = await sharp(buffer).metadata();
       const whiteTrimmedSignificantly = (
-        (currentMetadata.width - whiteMetadata.width) > 10 ||
-        (currentMetadata.height - whiteMetadata.height) > 10
+        (currentMetadata.width - whiteMetadata.width) > 50 ||
+        (currentMetadata.height - whiteMetadata.height) > 50
       );
 
       if (whiteTrimmedSignificantly) {
         console.log(`✓ Trimmed white borders: ${currentMetadata.width}×${currentMetadata.height} → ${whiteMetadata.width}×${whiteMetadata.height}`);
         buffer = trimmedBuffer;
+      } else {
+        console.log('No significant white borders detected');
       }
 
       return buffer;
@@ -177,34 +203,38 @@ export class ImageProcessor {
   }
 
   /**
-   * Remove background from image (preserve alpha channel)
+   * Basic background cleanup
+   * Note: Sharp has very limited background removal capabilities
+   * For proper background removal, consider using a service like remove.bg
    * @param {Buffer} buffer - Input image buffer
-   * @returns {Promise<Buffer>} Image with background removed
+   * @returns {Promise<Buffer>} Image with alpha channel
    */
-  async removeBackground(buffer) {
+  async cleanupBackground(buffer) {
     try {
-      // Use Sharp's built-in background removal
-      // This removes solid backgrounds and preserves transparency
+      // Simply ensure alpha channel and trim transparent edges
+      // Sharp cannot actually remove complex backgrounds
       const image = sharp(buffer);
-      const metadata = await image.metadata();
 
-      // Ensure image has alpha channel
-      let processedImage = image.ensureAlpha();
-
-      // If image doesn't have transparency, try to remove white/light backgrounds
-      if (!metadata.hasAlpha) {
-        processedImage = processedImage.flatten({ background: { r: 0, g: 0, b: 0, alpha: 0 } });
-      }
-
-      return await processedImage
-        .trim() // Remove empty edges
+      return await image
+        .ensureAlpha() // Ensure alpha channel exists
+        .trim() // Remove any existing transparent edges
         .toBuffer();
 
     } catch (error) {
-      console.error('Error removing background:', error.message);
-      // Return original if background removal fails
+      console.error('Error in cleanup:', error.message);
+      // Return original if cleanup fails
       return buffer;
     }
+  }
+
+  /**
+   * Legacy function - kept for compatibility
+   * @deprecated Use cleanupBackground instead
+   * @param {Buffer} buffer - Input image buffer
+   * @returns {Promise<Buffer>} Image buffer
+   */
+  async removeBackground(buffer) {
+    return this.cleanupBackground(buffer);
   }
 
   /**

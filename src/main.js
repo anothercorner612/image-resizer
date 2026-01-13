@@ -23,6 +23,8 @@ export class ShopifyImageAutomation {
       webpQuality: config.webpQuality || 90,
       dryRun: config.dryRun !== undefined ? config.dryRun : process.env.DRY_RUN === 'true',
       maxConcurrent: config.maxConcurrent || process.env.MAX_CONCURRENT_PROCESSES || 5,
+      enableAutoTrim: config.enableAutoTrim !== undefined ? config.enableAutoTrim : process.env.ENABLE_AUTO_TRIM !== 'false',
+      enableBackgroundRemoval: config.enableBackgroundRemoval !== undefined ? config.enableBackgroundRemoval : process.env.ENABLE_BACKGROUND_REMOVAL === 'true',
     };
 
     // Validate configuration
@@ -43,6 +45,8 @@ export class ShopifyImageAutomation {
     console.log(`Background: ${this.config.backgroundColor}`);
     console.log(`Shadow Opacity: ${this.config.shadowOpacity}`);
     console.log(`Dry Run: ${this.config.dryRun ? 'YES' : 'NO'}`);
+    console.log(`Auto-Trim: ${this.config.enableAutoTrim ? 'ENABLED' : 'DISABLED'}`);
+    console.log(`Background Removal: ${this.config.enableBackgroundRemoval ? 'ENABLED' : 'DISABLED'}`);
     console.log('================================\n');
   }
 
