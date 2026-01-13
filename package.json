@@ -1,0 +1,27 @@
+{
+  "name": "shopify-image-automation",
+  "version": "1.0.0",
+  "description": "Automated product image harmonization for Another Corner's Shopify store",
+  "main": "src/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node test_run.js",
+    "skip": "node mark_skip.js"
+  },
+  "keywords": [
+    "shopify",
+    "image-processing",
+    "automation",
+    "sharp"
+  ],
+  "author": "Another Corner",
+  "license": "MIT",
+  "dependencies": {
+    "@shopify/shopify-api": "^9.0.0",
+    "sharp": "^0.33.1",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.2",
+    "@imgly/background-removal-node": "^1.4.5"
+  }
+}
