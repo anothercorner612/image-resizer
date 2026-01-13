@@ -123,6 +123,25 @@ export class MetafieldManager {
   }
 
   /**
+   * Mark a product to be skipped (won't be processed)
+   * Use this for products that don't need harmonization or have issues
+   * @param {string|number} productId - Product ID
+   * @param {Object} details - Details about why it's being skipped
+   * @returns {Promise<Object>} Metafield data
+   */
+  async markAsSkipped(productId, details = {}) {
+    const value = {
+      status: 'skip',
+      skippedAt: new Date().toISOString(),
+      productTitle: details.productTitle || '',
+      reason: details.reason || 'Manually marked to skip',
+    };
+
+    console.log(`⊘ Marking product ${productId} as skipped: ${value.reason}`);
+    return await this.setMetafield(productId, value);
+  }
+
+  /**
    * Get products that need harmonization
    * @param {Array} allProducts - Array of all products
    * @returns {Promise<Array>} Products needing harmonization
@@ -135,7 +154,18 @@ export class MetafieldManager {
       try {
         const metafield = await this.getMetafield(product.id);
 
-        if (!metafield || metafield.status !== 'completed') {
+        // Skip products that are completed or marked to skip
+        if (!metafield) {
+          // No metafield = needs processing
+          needsHarmonization.push(product);
+        } else if (metafield.status === 'completed') {
+          // Already processed, skip
+          console.log(`⊘ Skipping ${product.id}: already completed`);
+        } else if (metafield.status === 'skip') {
+          // Manually marked to skip
+          console.log(`⊘ Skipping ${product.id}: ${metafield.reason || 'marked to skip'}`);
+        } else {
+          // Pending, failed, or in_progress = needs processing
           needsHarmonization.push(product);
         }
 
@@ -163,6 +193,7 @@ export class MetafieldManager {
       completed: 0,
       inProgress: 0,
       failed: 0,
+      skipped: 0,
       pending: 0,
     };
 
@@ -184,6 +215,9 @@ export class MetafieldManager {
               break;
             case 'failed':
               stats.failed++;
+              break;
+            case 'skip':
+              stats.skipped++;
               break;
             default:
               stats.pending++;

@@ -228,10 +228,32 @@ export class ImageProcessor {
 
       // Convert Blob to Buffer
       const arrayBuffer = await blob.arrayBuffer();
-      const resultBuffer = Buffer.from(arrayBuffer);
+      let resultBuffer = Buffer.from(arrayBuffer);
 
-      // Don't trim after background removal - the AI already gave us a clean transparent PNG
-      // Trimming here would remove white product content (like white book covers)
+      // Trim transparent edges left by AI (but preserve white product content)
+      // This removes fully transparent borders without touching white products
+      console.log('Trimming transparent edges...');
+      try {
+        const trimmed = await sharp(resultBuffer)
+          .trim({
+            threshold: 1, // Very low threshold - only removes fully transparent pixels
+            lineArt: true // Better for preserving product edges
+          })
+          .toBuffer();
+
+        const originalMeta = await sharp(resultBuffer).metadata();
+        const trimmedMeta = await sharp(trimmed).metadata();
+
+        // Apply if it actually trimmed something
+        if ((originalMeta.width - trimmedMeta.width) > 0 ||
+            (originalMeta.height - trimmedMeta.height) > 0) {
+          console.log(`✓ Trimmed ${originalMeta.width - trimmedMeta.width}px width, ${originalMeta.height - trimmedMeta.height}px height`);
+          resultBuffer = trimmed;
+        }
+      } catch (trimError) {
+        console.log('Transparent edge trim skipped');
+      }
+
       console.log('✓ Background removed successfully');
       return resultBuffer;
 

@@ -263,6 +263,7 @@ export class ShopifyImageAutomation {
     console.log(`✓ Completed:        ${stats.completed} (${this.percentage(stats.completed, stats.total)}%)`);
     console.log(`→ In Progress:      ${stats.inProgress}`);
     console.log(`✗ Failed:           ${stats.failed}`);
+    console.log(`⊘ Skipped:          ${stats.skipped}`);
     console.log(`⏳ Pending:         ${stats.pending}`);
     console.log('='.repeat(60));
   }
