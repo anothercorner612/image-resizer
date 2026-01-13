@@ -12,8 +12,7 @@ export class ImageProcessor {
   constructor(config) {
     this.config = config;
     this.pythonPath = 'python3'; 
-    this.scriptPath = path.join(__dirname, 'remove_bg.py');
-  }
+    this.scriptPath = path.join(__dirname, '..', 'remove_bg.py');  }
 
   // RENAMED from 'process' to 'processImage' to match test_run.js
   async processImage(inputBuffer, context = {}) {
