@@ -13,10 +13,66 @@ dotenv.config();
 console.log("🚀 SCRIPT STARTING...");
 
 /**
- * Your TestRunner Class stays exactly here...
+ * Test Runner - Finds examples of each category and generates comparison HTML
  */
 class TestRunner {
-  // ... (keep all your existing class code)
+  constructor() {
+    this.config = {
+      storeUrl: process.env.SHOPIFY_STORE_URL,
+      accessToken: process.env.SHOPIFY_ACCESS_TOKEN,
+      canvasWidth: process.env.CANVAS_WIDTH || 2000,
+      canvasHeight: process.env.CANVAS_HEIGHT || 2500,
+      backgroundColor: process.env.BACKGROUND_COLOR || '#f3f3f4',
+    };
+
+    this.shopify = new ShopifyClient(this.config);
+    this.imageProcessor = new ImageProcessor(this.config);
+    this.scaler = new ProductScaler(
+      parseInt(this.config.canvasWidth),
+      parseInt(this.config.canvasHeight)
+    );
+
+    this.outputDir = './output';
+  }
+
+  async run(perCategory = 3) {
+    try {
+      console.log(`=== Test Run: Finding ${perCategory} Examples Per Category ===\n`);
+
+      // Create output directory
+      await fs.mkdir(this.outputDir, { recursive: true });
+
+      // 1. Find examples
+      console.log('Finding example products...');
+      const allProducts = await this.shopify.getAllProducts();
+      
+      // For this test run, we'll just process the first few found
+      const examples = allProducts.slice(0, perCategory * 4); 
+
+      if (examples.length === 0) {
+        console.log('No products found in Shopify!');
+        return;
+      }
+
+      // 2. Process examples
+      for (const product of examples) {
+        if (!product.images || !product.images[0]) continue;
+        
+        console.log(`Processing: ${product.title}`);
+        const buffer = await this.shopify.downloadImage(product.images[0].src);
+        const result = await this.imageProcessor.processImage(buffer, { title: product.title });
+        
+        const outPath = path.join(this.outputDir, `processed_${product.id}.webp`);
+        await fs.writeFile(outPath, result.buffer);
+        console.log(`✓ Saved to ${outPath}`);
+      }
+
+      console.log('\n✓ Test run complete!');
+    } catch (error) {
+      console.error('Run encountered an error:', error);
+      throw error;
+    }
+  }
 }
 
 // --- 4. EXECUTION BLOCK WITH CATCH-ALL ---
