@@ -1,7 +1,6 @@
 import sharp from 'sharp';
 import { ProductScaler } from './scaler.js';
 import fs from 'fs/promises';
-import { removeBackground as removeBackgroundAI } from '@imgly/background-removal-node';
 
 /**
  * Image Processor - Handles all image processing operations
@@ -187,40 +186,91 @@ export class ImageProcessor {
   }
 
   /**
-   * Remove background using AI model
-   * Uses @imgly/background-removal-node for high-quality background removal
+   * Remove background using Sharp's built-in features
+   * Multi-strategy approach for different background types
    * @param {Buffer} buffer - Input image buffer
    * @returns {Promise<Buffer>} Image with background removed (PNG with alpha)
    */
   async cleanupBackground(buffer) {
     try {
-      console.log('Removing background with AI model...');
+      console.log('Removing background...');
+      const image = sharp(buffer);
+      const metadata = await image.metadata();
 
-      // Use AI model to remove background
-      // First run will download ~50MB model (cached for future use)
-      const blob = await removeBackgroundAI(buffer);
+      // Strategy 1: Try removing solid white/light backgrounds
+      try {
+        // Remove near-white backgrounds (product photos often have off-white backgrounds)
+        const removed = await sharp(buffer)
+          .removeAlpha() // Start fresh
+          .flatten({ background: { r: 255, g: 255, b: 255 } }) // Flatten to white
+          .trim({ threshold: 10, background: { r: 255, g: 255, b: 255 } }) // Trim white edges
+          .toBuffer();
 
-      // Convert Blob to Buffer
-      const arrayBuffer = await blob.arrayBuffer();
-      const resultBuffer = Buffer.from(arrayBuffer);
+        const removedMeta = await sharp(removed).metadata();
 
-      console.log('✓ Background removed successfully');
-      return resultBuffer;
+        // If trimming removed significant area, we found a white background
+        const areaRemoved = (metadata.width * metadata.height) - (removedMeta.width * removedMeta.height);
+        const percentRemoved = (areaRemoved / (metadata.width * metadata.height)) * 100;
+
+        if (percentRemoved > 5) {
+          console.log(`✓ Removed white background (${percentRemoved.toFixed(1)}% trimmed)`);
+
+          // Now make the white areas transparent
+          const transparent = await sharp(removed)
+            .ensureAlpha()
+            .raw()
+            .toBuffer({ resolveWithObject: true });
+
+          // Create a mask where white pixels become transparent
+          const { data, info } = transparent;
+          for (let i = 0; i < data.length; i += info.channels) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+
+            // If pixel is near-white, make it transparent
+            if (r > 240 && g > 240 && b > 240) {
+              data[i + 3] = 0; // Set alpha to 0
+            }
+          }
+
+          return await sharp(data, {
+            raw: {
+              width: info.width,
+              height: info.height,
+              channels: info.channels
+            }
+          })
+          .png()
+          .toBuffer();
+        }
+      } catch (e) {
+        // Strategy 1 failed, continue to strategy 2
+      }
+
+      // Strategy 2: Check if image already has transparency
+      if (metadata.hasAlpha) {
+        console.log('✓ Image already has alpha channel');
+        return await sharp(buffer)
+          .trim({ threshold: 5 }) // Just trim edges
+          .ensureAlpha()
+          .toBuffer();
+      }
+
+      // Strategy 3: Basic trim and add alpha
+      console.log('Adding transparency...');
+      return await sharp(buffer)
+        .ensureAlpha()
+        .trim({ threshold: 10 })
+        .toBuffer();
 
     } catch (error) {
-      console.error('AI background removal failed:', error.message);
-      console.log('Falling back to basic cleanup...');
-
-      // Fallback to basic cleanup if AI fails
+      console.warn('Background removal partially failed:', error.message);
+      // Return original with alpha channel added
       try {
-        const image = sharp(buffer);
-        return await image
-          .ensureAlpha()
-          .trim()
-          .toBuffer();
+        return await sharp(buffer).ensureAlpha().toBuffer();
       } catch (fallbackError) {
-        console.error('Fallback also failed:', fallbackError.message);
-        // Return original if everything fails
+        console.error('Complete fallback failed:', fallbackError.message);
         return buffer;
       }
     }

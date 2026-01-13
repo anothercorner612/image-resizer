@@ -159,8 +159,8 @@ class ImageDiagnostics {
       console.log(`⚠️  EXTREME UPSCALING: ${(scalingInfo.scaled.scaleFactor * 100).toFixed(0)}%`);
     }
 
-    // Try background removal with ACTUAL AI
-    console.log('Testing AI background removal...');
+    // Try background removal using ImageProcessor
+    console.log('Testing background removal...');
     let backgroundRemoved;
     analysis.backgroundRemovalFailed = false;
     analysis.backgroundRemovalTime = 0;
@@ -168,22 +168,27 @@ class ImageDiagnostics {
     try {
       const startTime = Date.now();
 
-      // Import and use the actual AI background removal
-      const { removeBackground } = await import('@imgly/background-removal-node');
-      const blob = await removeBackground(originalBuffer);
+      // Use the actual ImageProcessor to test background removal
+      const processor = new ImageProcessor({
+        canvasWidth: 2000,
+        canvasHeight: 2500,
+        backgroundColor: '#f3f3f4',
+        shadowOpacity: 0.18,
+        webpQuality: 90,
+        enableAutoTrim: false, // Don't auto-trim for this test
+        enableBackgroundRemoval: true
+      });
 
-      // Convert Blob to Buffer
-      const arrayBuffer = await blob.arrayBuffer();
-      backgroundRemoved = Buffer.from(arrayBuffer);
+      backgroundRemoved = await processor.cleanupBackground(originalBuffer);
 
       analysis.backgroundRemovalTime = Date.now() - startTime;
-      console.log(`✓ AI background removal OK (${analysis.backgroundRemovalTime}ms)`);
+      console.log(`✓ Background removal OK (${analysis.backgroundRemovalTime}ms)`);
 
       const removedMeta = await sharp(backgroundRemoved).metadata();
 
       // Save for comparison
       await fs.writeFile(
-        `${this.outputDir}/${product.id}_2_ai_removed.png`,
+        `${this.outputDir}/${product.id}_2_bg_removed.png`,
         backgroundRemoved
       );
 
@@ -195,14 +200,14 @@ class ImageDiagnostics {
       };
 
     } catch (error) {
-      console.log(`✗ AI BACKGROUND REMOVAL FAILED: ${error.message}`);
+      console.log(`✗ BACKGROUND REMOVAL FAILED: ${error.message}`);
       analysis.backgroundRemovalFailed = true;
       analysis.backgroundRemovalError = error.message;
       backgroundRemoved = originalBuffer;
 
       // Save original as "removed" so we can see it failed
       await fs.writeFile(
-        `${this.outputDir}/${product.id}_2_ai_removed.png`,
+        `${this.outputDir}/${product.id}_2_bg_removed.png`,
         originalBuffer
       );
     }
@@ -315,12 +320,13 @@ class ImageDiagnostics {
     ${p.hasWhiteBorder ? '<li class="warning-text">⚠️ White border detected</li>' : ''}
   </ul>
 
-  <h4>AI Background Removal</h4>
+  <h4>Background Removal (Sharp-based)</h4>
   <ul>
     <li>Status: ${p.backgroundRemovalFailed ? '<span class="issue">FAILED</span>' : '<span class="ok-text">SUCCESS</span>'}</li>
     ${p.backgroundRemovalFailed ? `<li class="issue">Error: ${p.backgroundRemovalError || 'Unknown'}</li>` : `<li>Processing time: ${p.backgroundRemovalTime}ms</li>`}
     ${p.afterBackgroundRemoval ? `
     <li>Output: ${p.afterBackgroundRemoval.width}×${p.afterBackgroundRemoval.height}</li>
+    <li>Has Alpha: ${p.afterBackgroundRemoval.hasAlpha ? '<span class="ok-text">Yes</span>' : '<span class="issue">No</span>'}</li>
     <li>Image Changed: ${p.afterBackgroundRemoval.changed ? '<span class="ok-text">Yes</span>' : '<span class="issue">No - IDENTICAL TO ORIGINAL</span>'}</li>
     ` : ''}
   </ul>
@@ -340,8 +346,9 @@ class ImageDiagnostics {
   </ul>
 
   ${hasIssues ? '<h4>⚠️ Issues Detected</h4><ul>' : ''}
-  ${p.backgroundRemovalFailed ? `<li class="issue">AI background removal failed: ${p.backgroundRemovalError || 'Unknown error'}</li>` : ''}
+  ${p.backgroundRemovalFailed ? `<li class="issue">Background removal failed: ${p.backgroundRemovalError || 'Unknown error'}</li>` : ''}
   ${p.afterBackgroundRemoval && !p.afterBackgroundRemoval.changed ? '<li class="issue">Background removal had no effect (file size unchanged)</li>' : ''}
+  ${p.afterBackgroundRemoval && !p.afterBackgroundRemoval.hasAlpha ? '<li class="issue">Output missing alpha channel</li>' : ''}
   ${p.hasWhiteBorder ? '<li class="issue">White border detected in original</li>' : ''}
   ${p.tooSmall ? '<li class="issue">Original image very small (< 400px)</li>' : ''}
   ${p.scalingIssue ? '<li class="issue">Extreme upscaling required (> 200%)</li>' : ''}
