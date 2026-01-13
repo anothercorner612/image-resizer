@@ -1,538 +1,99 @@
-import sharp from 'sharp';
-import { ProductScaler } from './scaler.js';
-import fs from 'fs/promises';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import path from 'path';
-import { fileURLToPath } from 'url';
+const sharp = require('sharp');
+const path = require('path');
+const fs = require('fs').promises;
+const { spawn } = require('child_process');
 
-const execAsync = promisify(exec);
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-/**
- * Image Processor - Handles all image processing operations
- * Uses Sharp library for image manipulation
- */
-export class ImageProcessor {
+class ImageProcessor {
   constructor(config) {
-    this.canvasWidth = parseInt(config.canvasWidth) || 2000;
-    this.canvasHeight = parseInt(config.canvasHeight) || 2500;
-    this.backgroundColor = config.backgroundColor || '#f3f3f4';
-    this.shadowOpacity = parseFloat(config.shadowOpacity) || 0.18;
-    this.webpQuality = parseInt(config.webpQuality) || 90;
-
-    // Optional features (can be disabled via config)
-    this.enableAutoTrim = config.enableAutoTrim !== false; // default: true
-    this.enableBackgroundRemoval = config.enableBackgroundRemoval !== false; // default: true
-
-    this.scaler = new ProductScaler(this.canvasWidth, this.canvasHeight);
+    this.config = config;
+    this.pythonPath = 'python3'; 
+    this.scriptPath = path.join(__dirname, 'remove_bg.py');
   }
 
   /**
-   * Process an image buffer
-   * @param {Buffer} buffer - Input image buffer
-   * @param {Object} productInfo - Product information (title, type)
-   * @returns {Promise<Object>} Processed image buffer and metadata
+   * Main processing function
    */
-  async processImage(buffer, productInfo = {}) {
+  async process(inputBuffer) {
+    const tempInput = path.join(__dirname, `temp_in_${Date.now()}.png`);
+    const tempOutput = path.join(__dirname, `temp_out_${Date.now()}.png`);
+
     try {
-      console.log('\n=== Processing Image ===');
+      // 1. Save buffer to temp file for Python to read
+      await fs.writeFile(tempInput, inputBuffer);
 
-      let workingBuffer = buffer;
+      // 2. Run Python background removal
+      await this.runPythonRemoveBg(tempInput, tempOutput);
 
-      // 1. Auto-trim black bars and letterboxing (optional)
-      if (this.enableAutoTrim) {
-        console.log('Auto-trimming letterboxing/black bars...');
-        workingBuffer = await this.autoTrim(workingBuffer);
-      } else {
-        console.log('Auto-trim disabled, using original image');
-      }
+      // 3. Load the result from Python
+      let processedImage = sharp(tempOutput);
 
-      // 2. Load image and get metadata
-      const image = sharp(workingBuffer);
-      const metadata = await image.metadata();
-      console.log(`Original dimensions: ${metadata.width}×${metadata.height}`);
+      // 4. TRIM: This is crucial. It finds the actual edges of the product
+      // that the Python script made solid.
+      const trimmedBuffer = await processedImage.trim().toBuffer();
+      const metadata = await sharp(trimmedBuffer).metadata();
 
-      // 3. Get scaling information
-      const scalingInfo = this.scaler.getScalingInfo(
-        metadata.width,
-        metadata.height,
-        productInfo.title || '',
-        productInfo.type || ''
-      );
-      this.scaler.logScalingInfo(scalingInfo);
+      // 5. Create the 2000x2500 Canvas (Light Gray #f2f2f2)
+      const canvasWidth = 2000;
+      const canvasHeight = 2500;
+      
+      // Scale product to fit 80% of canvas height
+      const targetHeight = Math.round(canvasHeight * 0.8);
+      const scale = targetHeight / metadata.height;
+      const targetWidth = Math.round(metadata.width * scale);
 
-      // 4. Prepare product image (with or without background removal)
-      console.log('Preparing product image...');
-      let processedProduct;
-
-      if (this.enableBackgroundRemoval && !metadata.hasAlpha) {
-        console.log('Removing background with AI model...');
-        processedProduct = await this.cleanupBackground(workingBuffer);
-      } else if (metadata.hasAlpha) {
-        console.log('Image already has transparency, skipping background removal');
-        processedProduct = await sharp(workingBuffer).ensureAlpha().toBuffer();
-      } else {
-        console.log('Background removal disabled, using original image');
-        processedProduct = await sharp(workingBuffer).ensureAlpha().toBuffer();
-      }
-
-      // 5. Resize (use 'inside' to avoid adding letterbox padding)
-      const resizedProduct = await sharp(processedProduct)
-        .resize(scalingInfo.scaled.width, scalingInfo.scaled.height, {
-          fit: 'inside', // Scales down without adding padding/black bars
-          withoutEnlargement: false // Allow upscaling if needed
-        })
+      const resizedProduct = await sharp(trimmedBuffer)
+        .resize(targetWidth, targetHeight)
         .toBuffer();
 
-      // Get actual dimensions after resize (might be smaller than target due to 'inside' fit)
-      const resizedMetadata = await sharp(resizedProduct).metadata();
-      const actualWidth = resizedMetadata.width;
-      const actualHeight = resizedMetadata.height;
-      console.log(`Resized to: ${actualWidth}×${actualHeight}`);
-
-      // 6. Create canvas with background color
-      console.log('Creating canvas with background...');
-      const canvas = await this.createCanvas();
-
-      // 7. Generate contact shadow using ACTUAL dimensions
-      console.log('Generating contact shadow...');
-      const shadowBuffer = await this.createContactShadow(
-        actualWidth,
-        actualHeight
-      );
-
-      // 8. Get positioning using ACTUAL dimensions
-      const centerPos = this.scaler.getCenterPosition(
-        actualWidth,
-        actualHeight
-      );
-
-      // 9. Composite everything together
-      console.log('Compositing layers...');
-      const finalImage = await sharp(canvas)
-        .composite([
-          // First: shadow layer
-          {
-            input: shadowBuffer,
-            top: centerPos.y,
-            left: centerPos.x,
-            blend: 'over'
-          },
-          // Second: product layer (on top of shadow)
-          {
-            input: resizedProduct,
-            top: centerPos.y,
-            left: centerPos.x,
-            blend: 'over'
-          }
-        ])
-        .webp({ quality: this.webpQuality })
-        .toBuffer();
-
-      console.log('✓ Image processing complete');
-
-      return {
-        buffer: finalImage,
-        scalingInfo,
-        metadata: {
-          width: this.canvasWidth,
-          height: this.canvasHeight,
-          format: 'webp',
-          size: finalImage.length
+      // 6. Create final composition
+      return await sharp({
+        create: {
+          width: canvasWidth,
+          height: canvasHeight,
+          channels: 4,
+          background: '#f2f2f2'
         }
-      };
-
-    } catch (error) {
-      console.error('Error processing image:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Auto-trim black bars and letterboxing from images
-   * Removes solid black or white borders before processing
-   * More conservative to avoid removing actual product content
-   * @param {Buffer} buffer - Input image buffer
-   * @returns {Promise<Buffer>} Trimmed image buffer
-   */
-  async autoTrim(buffer) {
-    try {
-      const image = sharp(buffer);
-      const metadata = await image.metadata();
-
-      // Try trimming with threshold for black borders
-      // Threshold of 20 catches near-black bars (RGB up to 20,20,20)
-      // This handles letterboxing from screenshots and scans
-      let trimmedBuffer = await image
-        .trim({
-          threshold: 20, // Catch near-black bars (not just pure black)
-          background: { r: 0, g: 0, b: 0 } // Trim black
-        })
-        .toBuffer();
-
-      // Check if trimming actually removed significant borders
-      // Require at least 50px removed to prevent accidental trimming of content
-      const trimmedMetadata = await sharp(trimmedBuffer).metadata();
-      const trimmedSignificantly = (
-        (metadata.width - trimmedMetadata.width) > 50 ||
-        (metadata.height - trimmedMetadata.height) > 50
-      );
-
-      if (trimmedSignificantly) {
-        console.log(`✓ Trimmed black bars: ${metadata.width}×${metadata.height} → ${trimmedMetadata.width}×${trimmedMetadata.height}`);
-        buffer = trimmedBuffer;
-      } else {
-        console.log('No significant black borders detected');
-      }
-
-      // Also try trimming white borders (only if significant)
-      const currentMetadata = await sharp(buffer).metadata();
-      trimmedBuffer = await sharp(buffer)
-        .trim({
-          threshold: 15, // Slightly more aggressive for white borders
-          background: { r: 255, g: 255, b: 255 } // Trim white
-        })
-        .toBuffer();
-
-      // Check if white trimming removed something significant
-      const whiteMetadata = await sharp(trimmedBuffer).metadata();
-      const whiteTrimmedSignificantly = (
-        (currentMetadata.width - whiteMetadata.width) > 50 ||
-        (currentMetadata.height - whiteMetadata.height) > 50
-      );
-
-      if (whiteTrimmedSignificantly) {
-        console.log(`✓ Trimmed white borders: ${currentMetadata.width}×${currentMetadata.height} → ${whiteMetadata.width}×${whiteMetadata.height}`);
-        buffer = trimmedBuffer;
-      } else {
-        console.log('No significant white borders detected');
-      }
-
-      return buffer;
-
-    } catch (error) {
-      console.warn('Auto-trim failed, using original image:', error.message);
-      // Return original if trimming fails
-      return buffer;
-    }
-  }
-
-  /**
-   * Analyze if product is predominantly white/light colored
-   * Used to decide trim aggressiveness
-   * @param {Buffer} buffer - Image buffer with transparent background
-   * @returns {Promise<Object>} Analysis result with isWhiteProduct flag and stats
-   */
-  async analyzeProductColor(buffer) {
-    try {
-      const stats = await sharp(buffer).stats();
-
-      // Get average RGB values across all channels (excluding alpha)
-      const channels = stats.channels.slice(0, 3); // RGB only
-      const avgR = channels[0].mean;
-      const avgG = channels[1].mean;
-      const avgB = channels[2].mean;
-
-      // Calculate overall brightness (0-255)
-      const brightness = (avgR + avgG + avgB) / 3;
-
-      // Calculate color saturation (how colorful vs grayscale)
-      const maxChannel = Math.max(avgR, avgG, avgB);
-      const minChannel = Math.min(avgR, avgG, avgB);
-      const saturation = maxChannel - minChannel;
-
-      // White/light products are: bright (>200) AND low saturation (<30)
-      const isWhiteProduct = brightness > 200 && saturation < 30;
-
-      return {
-        isWhiteProduct,
-        brightness: Math.round(brightness),
-        saturation: Math.round(saturation),
-        avgColor: { r: Math.round(avgR), g: Math.round(avgG), b: Math.round(avgB) }
-      };
-    } catch (error) {
-      console.log('Color analysis failed, using default trim');
-      return { isWhiteProduct: false, brightness: 128, saturation: 50 };
-    }
-  }
-
-  /**
-   * Remove background using withoutbg Python tool
-   * Uses withoutbg via Python subprocess for high-quality background removal
-   * @param {Buffer} buffer - Input image buffer
-   * @returns {Promise<Buffer>} Image with background removed (PNG with alpha)
-   */
-  async cleanupBackground(buffer) {
-    const tempDir = path.join(__dirname, '..', 'temp');
-    const timestamp = Date.now();
-    const inputPath = path.join(tempDir, `input_${timestamp}.png`);
-    const outputPath = path.join(tempDir, `output_${timestamp}.png`);
-
-    try {
-      console.log('Removing background with withoutbg (Python)...');
-
-      // Create temp directory
-      await fs.mkdir(tempDir, { recursive: true });
-
-      // Write buffer to temp file
-      await fs.writeFile(inputPath, buffer);
-
-      // Call Python script
-      const pythonScript = path.join(__dirname, '..', 'remove_bg.py');
-      const command = `python3 "${pythonScript}" "${inputPath}" "${outputPath}"`;
-
-      console.log('→ Executing Python background removal...');
-      console.log('  Note: First run downloads ~320MB models (one-time)');
-
-      const { stdout, stderr } = await execAsync(command, {
-        timeout: 120000, // 2 minute timeout
-        maxBuffer: 50 * 1024 * 1024 // 50MB buffer
-      });
-
-      // Log Python output
-      if (stderr) {
-        console.log(stderr.trim());
-      }
-
-      // Read result
-      let resultBuffer = await fs.readFile(outputPath);
-
-      // Clean up temp files
-      await fs.unlink(inputPath).catch(() => {});
-      await fs.unlink(outputPath).catch(() => {});
-
-      // Smart edge trimming based on product color analysis
-      console.log('Analyzing product for smart trimming...');
-      const colorAnalysis = await this.analyzeProductColor(resultBuffer);
-
-      let trimThreshold;
-      if (colorAnalysis.isWhiteProduct) {
-        trimThreshold = 5; // Very conservative for white products
-        console.log(`→ White/light product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
-        console.log(`  Using conservative trim (threshold: ${trimThreshold})`);
-      } else {
-        trimThreshold = 15; // Moderate trim - withoutbg should have clean edges
-        console.log(`→ Colorful product detected (brightness: ${colorAnalysis.brightness}, saturation: ${colorAnalysis.saturation})`);
-        console.log(`  Using moderate trim (threshold: ${trimThreshold})`);
-      }
-
-      try {
-        const trimmed = await sharp(resultBuffer)
-          .trim({
-            threshold: trimThreshold
-          })
-          .toBuffer();
-
-        const originalMeta = await sharp(resultBuffer).metadata();
-        const trimmedMeta = await sharp(trimmed).metadata();
-
-        if ((originalMeta.width - trimmedMeta.width) > 0 ||
-            (originalMeta.height - trimmedMeta.height) > 0) {
-          console.log(`✓ Trimmed ${originalMeta.width - trimmedMeta.width}px width, ${originalMeta.height - trimmedMeta.height}px height`);
-          resultBuffer = trimmed;
-        } else {
-          console.log('No edges to trim');
-        }
-      } catch (trimError) {
-        console.log('Edge trimming skipped:', trimError.message);
-      }
-
-      console.log('✓ Background removed successfully with withoutbg');
-      return resultBuffer;
-
-    } catch (error) {
-      console.error('withoutbg background removal failed:', error.message);
-      console.log('Falling back to basic cleanup...');
-
-      // Clean up temp files on error
-      await fs.unlink(inputPath).catch(() => {});
-      await fs.unlink(outputPath).catch(() => {});
-
-      // Fallback to basic cleanup if Python fails
-      try {
-        const image = sharp(buffer);
-        return await image
-          .ensureAlpha()
-          .trim()
-          .toBuffer();
-      } catch (fallbackError) {
-        console.error('Fallback also failed:', fallbackError.message);
-        // Return original if everything fails
-        return buffer;
-      }
-    }
-  }
-
-  /**
-   * Legacy function - kept for compatibility
-   * @deprecated Use cleanupBackground instead
-   * @param {Buffer} buffer - Input image buffer
-   * @returns {Promise<Buffer>} Image buffer
-   */
-  async removeBackground(buffer) {
-    return this.cleanupBackground(buffer);
-  }
-
-  /**
-   * Create a canvas with background color
-   * @returns {Promise<Buffer>} Canvas buffer
-   */
-  async createCanvas() {
-    // Parse hex color to RGB
-    const rgb = this.hexToRgb(this.backgroundColor);
-
-    return await sharp({
-      create: {
-        width: this.canvasWidth,
-        height: this.canvasHeight,
-        channels: 4,
-        background: { r: rgb.r, g: rgb.g, b: rgb.b, alpha: 1 }
-      }
-    })
-    .png()
-    .toBuffer();
-  }
-
-  /**
-   * Create contact shadow at product base
-   * @param {number} productWidth - Scaled product width
-   * @param {number} productHeight - Scaled product height
-   * @returns {Promise<Buffer>} Shadow buffer
-   */
-  async createContactShadow(productWidth, productHeight) {
-    const shadowPos = this.scaler.getShadowPosition(productWidth, productHeight);
-
-    // Create SVG for elliptical shadow with blur
-    // Position shadow AT the bottom edge (center at productHeight puts shadow directly at base)
-    const svg = `
-      <svg width="${productWidth}" height="${productHeight}">
-        <defs>
-          <filter id="blur">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="15" />
-          </filter>
-        </defs>
-        <ellipse
-          cx="${productWidth / 2}"
-          cy="${productHeight}"
-          rx="${shadowPos.rx}"
-          ry="${shadowPos.ry}"
-          fill="rgba(0, 0, 0, ${this.shadowOpacity})"
-          filter="url(#blur)"
-        />
-      </svg>
-    `;
-
-    return await sharp(Buffer.from(svg))
+      })
+      .composite([{
+        input: resizedProduct,
+        gravity: 'center'
+      }])
       .png()
       .toBuffer();
-  }
 
-  /**
-   * Process and save image locally (for testing)
-   * @param {string} inputPath - Input file path
-   * @param {string} outputPath - Output file path
-   * @param {Object} productInfo - Product information
-   * @returns {Promise<Object>} Processing result
-   */
-  async processAndSave(inputPath, outputPath, productInfo = {}) {
-    try {
-      console.log(`\nProcessing: ${inputPath}`);
-
-      // Read input file
-      const buffer = await fs.readFile(inputPath);
-
-      // Process image
-      const result = await this.processImage(buffer, productInfo);
-
-      // Save output file
-      await fs.writeFile(outputPath, result.buffer);
-      console.log(`✓ Saved to: ${outputPath}`);
-
-      return {
-        ...result,
-        inputPath,
-        outputPath
-      };
-
-    } catch (error) {
-      console.error(`Error processing ${inputPath}:`, error.message);
-      throw error;
+    } finally {
+      // Cleanup temp files
+      await fs.unlink(tempInput).catch(() => {});
+      await fs.unlink(tempOutput).catch(() => {});
     }
   }
 
-  /**
-   * Convert hex color to RGB
-   * @param {string} hex - Hex color code
-   * @returns {Object} RGB values
-   */
-  hexToRgb(hex) {
-    // Remove # if present
-    hex = hex.replace(/^#/, '');
-
-    // Parse hex values
-    const bigint = parseInt(hex, 16);
-    const r = (bigint >> 16) & 255;
-    const g = (bigint >> 8) & 255;
-    const b = bigint & 255;
-
-    return { r, g, b };
+  runPythonRemoveBg(input, output) {
+    return new Promise((resolve, reject) => {
+      const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
+      py.stderr.on('data', (data) => console.error(`Python: ${data}`));
+      py.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Python script failed with code ${code}`));
+      });
+    });
   }
 
-  /**
-   * Get image dimensions from buffer
-   * @param {Buffer} buffer - Image buffer
-   * @returns {Promise<Object>} Width and height
-   */
+  // --- HELPER FUNCTIONS REQUIRED BY INDEX.JS ---
+
   async getImageDimensions(buffer) {
     const metadata = await sharp(buffer).metadata();
-    return {
-      width: metadata.width,
-      height: metadata.height
-    };
+    return { width: metadata.width, height: metadata.height };
   }
 
-  /**
-   * Validate image format
-   * @param {Buffer} buffer - Image buffer
-   * @returns {Promise<boolean>} True if valid image
-   */
   async isValidImage(buffer) {
     try {
       await sharp(buffer).metadata();
       return true;
-    } catch (error) {
+    } catch (e) {
       return false;
     }
   }
-
-  /**
-   * Convert image to WebP format
-   * @param {Buffer} buffer - Input image buffer
-   * @returns {Promise<Buffer>} WebP buffer
-   */
-  async convertToWebP(buffer) {
-    return await sharp(buffer)
-      .webp({ quality: this.webpQuality })
-      .toBuffer();
-  }
-
-  /**
-   * Get image info for logging
-   * @param {Buffer} buffer - Image buffer
-   * @returns {Promise<Object>} Image information
-   */
-  async getImageInfo(buffer) {
-    const metadata = await sharp(buffer).metadata();
-    return {
-      format: metadata.format,
-      width: metadata.width,
-      height: metadata.height,
-      channels: metadata.channels,
-      hasAlpha: metadata.hasAlpha,
-      space: metadata.space,
-      size: buffer.length
-    };
-  }
 }
+
+module.exports = ImageProcessor;
