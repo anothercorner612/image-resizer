@@ -6,12 +6,14 @@ Automated product image harmonization system for Another Corner's Shopify store.
 
 - **Consistent Canvas**: All images standardized to 2000×2500px with #f3f3f4 background
 - **Intelligent Scaling**: Automatic categorization and conditional scaling based on product dimensions
+- **Advanced Background Removal**: Uses withoutbg with NumPy/SciPy edge processing for clean results
 - **Contact Shadows**: Professional 18% opacity shadows positioned at product base
 - **WebP Output**: Optimized WebP format at 90% quality for fast loading
 - **Metafield Tracking**: Progress tracking using Shopify metafields (not tags)
 - **Batch Processing**: Concurrent processing with rate limiting
 - **Test Suite**: Visual comparison HTML for quality verification
 - **Dry Run Mode**: Test without uploading to Shopify
+- **Skip Functionality**: Mark products to skip via metafields
 
 ## Visual Specifications
 
@@ -41,9 +43,14 @@ image-resizer/
 │   ├── scaler.js            # Product categorization & scaling logic
 │   ├── imageProcessor.js    # Image processing with Sharp
 │   └── main.js              # Main automation orchestrator
+├── remove_bg.py             # Python wrapper for withoutbg with edge processing
 ├── test_run.js              # Testing suite
+├── test_bg_removal.js       # Background removal test
+├── test_withoutbg.js        # withoutbg integration test
+├── mark_skip.js             # Utility to mark products as skipped
 ├── CHECKLIST.md             # Quality verification checklist
 ├── README.md                # This file
+├── REVIEW_REPORT.md         # Comprehensive code review
 ├── package.json             # Dependencies and scripts
 ├── .env.example             # Environment variables template
 └── .gitignore               # Git ignore rules
@@ -53,9 +60,10 @@ image-resizer/
 
 ### Prerequisites
 
-- Node.js 18+
-- npm or yarn
-- Shopify Admin API access token
+- **Node.js** 18+
+- **npm** or yarn
+- **Python** 3.6+ with pip
+- **Shopify Admin API** access token
 
 ### Setup
 
@@ -65,17 +73,24 @@ git clone https://github.com/anothercorner612/image-resizer.git
 cd image-resizer
 ```
 
-2. Install dependencies:
+2. Install Node.js dependencies:
 ```bash
 npm install
 ```
 
-3. Configure environment variables:
+3. Install Python dependencies:
+```bash
+pip3 install withoutbg numpy scipy pillow
+```
+
+**Note:** First run will download ~320MB of AI models from HuggingFace (one-time, cached for future use).
+
+4. Configure environment variables:
 ```bash
 cp .env.example .env
 ```
 
-4. Edit `.env` with your Shopify credentials:
+5. Edit `.env` with your Shopify credentials:
 ```bash
 SHOPIFY_STORE_URL=your-store.myshopify.com
 SHOPIFY_ACCESS_TOKEN=your_admin_api_access_token
@@ -217,9 +232,21 @@ Handles categorization and scaling logic:
 
 Performs image processing with Sharp:
 - `processImage(buffer, productInfo)` - Main processing pipeline
-- `removeBackground(buffer)` - Background removal
+- `cleanupBackground(buffer)` - AI background removal with edge processing
+- `analyzeProductColor(buffer)` - Smart color analysis for adaptive trimming
 - `createContactShadow(width, height)` - Generate shadow SVG
 - `processAndSave(inputPath, outputPath, productInfo)` - Local testing
+
+### Background Removal (remove_bg.py)
+
+Python subprocess wrapper for withoutbg with advanced edge processing:
+- **withoutbg Integration**: Uses ISNet, Depth Anything V2, Focus Matting models
+- **Alpha Channel Processing**: NumPy/SciPy operations for clean edges
+  - Binary mask threshold (alpha > 5) to capture faint edges
+  - Binary closing (3 iterations) to bridge small gaps
+  - Hole filling to ensure solid product bodies
+  - Gaussian blur (radius 0.5) for smooth professional edges
+- **Quality**: Comparable to remove.bg without API costs
 
 ### ShopifyImageAutomation (src/main.js)
 
@@ -231,19 +258,27 @@ Main orchestrator:
 ## Processing Pipeline
 
 1. **Fetch Products**: Get all products from Shopify with pagination
-2. **Filter**: Identify products needing harmonization (check metafields)
+2. **Filter**: Identify products needing harmonization (check metafields, skip marked products)
 3. **Download**: Download original product images
-4. **Categorize**: Determine category based on dimensions and metadata
-5. **Process**:
-   - Remove background (preserve alpha channel)
-   - Scale according to category rules
-   - Create canvas with #f3f3f4 background
-   - Generate contact shadow
-   - Composite layers
-   - Export as WebP
-6. **Upload**: Upload processed image to Shopify (if not dry run)
-7. **Cleanup**: Delete old image
-8. **Track**: Update metafield with processing status
+4. **Auto-Trim**: Remove letterboxing and black bars (threshold 20/15)
+5. **Background Removal**:
+   - Call Python subprocess with withoutbg
+   - AI models remove background
+   - NumPy/SciPy process alpha channel for clean edges
+   - Gaussian blur for professional edge smoothing
+6. **Smart Trimming**:
+   - Analyze product color (brightness/saturation)
+   - Conservative trim for white products (threshold 5)
+   - Moderate trim for colorful products (threshold 15)
+7. **Categorize**: Determine category based on dimensions and metadata
+8. **Scale**: Resize according to category rules
+9. **Canvas**: Create 2000×2500px canvas with #f3f3f4 background
+10. **Shadow**: Generate contact shadow positioned at product base
+11. **Composite**: Layer shadow and product on canvas
+12. **Export**: Convert to WebP at 90% quality
+13. **Upload**: Upload processed image to Shopify (if not dry run)
+14. **Cleanup**: Delete old image
+15. **Track**: Update metafield with processing status
 
 ## Quality Verification
 
@@ -294,6 +329,39 @@ npm start -- -l 10
 
 # Run test suite
 npm test
+
+# Skip a product (mark to not process)
+npm run skip <product_id> "reason"
+npm run skip 1234567890 "White edges issue"
+```
+
+## Skip Functionality
+
+Mark products to be skipped during processing:
+
+**Via Script:**
+```bash
+npm run skip <product_id> "Reason for skipping"
+```
+
+**Via Shopify Admin:**
+1. Go to Product → Metafields
+2. Set metafield:
+   - **Namespace:** `automation`
+   - **Key:** `harmonized`
+   - **Type:** JSON
+   - **Value:** `{"status": "skip", "reason": "Your reason"}`
+
+**Valid Status Values:**
+- `completed` - Already processed successfully
+- `skip` - Don't process (manually excluded)
+- `failed` - Processing failed
+- `in_progress` - Currently processing
+- (no metafield) - Needs processing
+
+Skipped products will show in statistics as:
+```
+⊘ Skipped: X
 ```
 
 ## Error Handling
@@ -328,11 +396,14 @@ The system respects Shopify API rate limits:
 - Ensure store URL is correct format (your-store.myshopify.com)
 
 **"Background removal not working"**
-- Ensure first run has internet access to download AI model (~50MB)
-- Model is cached in ~/.cache/background-removal/ for future use
-- Check ENABLE_BACKGROUND_REMOVAL=true in .env
-- Review console logs for specific error messages
-- AI model may struggle with very complex backgrounds - manual review recommended
+- Ensure Python 3 is installed: `python3 --version`
+- Install required packages: `pip3 install withoutbg numpy scipy pillow`
+- First run needs internet to download ~320MB AI models from HuggingFace
+- Models cached in `~/.cache/huggingface/` for future use
+- Check `ENABLE_BACKGROUND_REMOVAL=true` in .env
+- Verify `remove_bg.py` has execute permissions: `chmod +x remove_bg.py`
+- Review console logs for Python errors
+- For manual skip: `npm run skip <product_id> "reason"`
 
 **"Images look wrong in comparison.html"**
 - Check canvas dimensions match specifications
@@ -368,8 +439,12 @@ Always test changes with:
 
 ## Important Notes
 
+- **Python Required** - withoutbg runs via Python subprocess (Python 3.6+)
+- **First Run Setup** - Downloads ~320MB AI models from HuggingFace (one-time)
 - **Use metafields, NOT tags** - Metafields provide structured data tracking
+- **Skip Products** - Use `npm run skip <id>` to exclude products from processing
 - **Preserve alpha channel** - Essential for products with holes/transparency
+- **Advanced Edge Processing** - NumPy/SciPy clean edges after AI removal
 - **Shadow at base only** - Not behind entire product
 - **Exact color match** - #f3f3f4 must be precise
 - **WebP format** - For optimal file size and quality
