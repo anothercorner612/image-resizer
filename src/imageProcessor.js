@@ -71,29 +71,35 @@ export class ImageProcessor {
         processedProduct = await sharp(workingBuffer).ensureAlpha().toBuffer();
       }
 
-      // 5. Resize
+      // 5. Resize (use 'inside' to avoid adding letterbox padding)
       const resizedProduct = await sharp(processedProduct)
         .resize(scalingInfo.scaled.width, scalingInfo.scaled.height, {
-          fit: 'contain',
-          background: { r: 0, g: 0, b: 0, alpha: 0 }
+          fit: 'inside', // Scales down without adding padding/black bars
+          withoutEnlargement: false // Allow upscaling if needed
         })
         .toBuffer();
+
+      // Get actual dimensions after resize (might be smaller than target due to 'inside' fit)
+      const resizedMetadata = await sharp(resizedProduct).metadata();
+      const actualWidth = resizedMetadata.width;
+      const actualHeight = resizedMetadata.height;
+      console.log(`Resized to: ${actualWidth}×${actualHeight}`);
 
       // 6. Create canvas with background color
       console.log('Creating canvas with background...');
       const canvas = await this.createCanvas();
 
-      // 7. Generate contact shadow
+      // 7. Generate contact shadow using ACTUAL dimensions
       console.log('Generating contact shadow...');
       const shadowBuffer = await this.createContactShadow(
-        scalingInfo.scaled.width,
-        scalingInfo.scaled.height
+        actualWidth,
+        actualHeight
       );
 
-      // 8. Get positioning
+      // 8. Get positioning using ACTUAL dimensions
       const centerPos = this.scaler.getCenterPosition(
-        scalingInfo.scaled.width,
-        scalingInfo.scaled.height
+        actualWidth,
+        actualHeight
       );
 
       // 9. Composite everything together
@@ -149,12 +155,12 @@ export class ImageProcessor {
       const image = sharp(buffer);
       const metadata = await image.metadata();
 
-      // Try trimming with threshold for black borders only
-      // Use lower threshold (2 instead of 10) to be more conservative
-      // Only trim if it's truly solid black/white
+      // Try trimming with threshold for black borders
+      // Threshold of 20 catches near-black bars (RGB up to 20,20,20)
+      // This handles letterboxing from screenshots and scans
       let trimmedBuffer = await image
         .trim({
-          threshold: 2, // Very conservative - only pure black/white
+          threshold: 20, // Catch near-black bars (not just pure black)
           background: { r: 0, g: 0, b: 0 } // Trim black
         })
         .toBuffer();
@@ -178,7 +184,7 @@ export class ImageProcessor {
       const currentMetadata = await sharp(buffer).metadata();
       trimmedBuffer = await sharp(buffer)
         .trim({
-          threshold: 2,
+          threshold: 15, // Slightly more aggressive for white borders
           background: { r: 255, g: 255, b: 255 } // Trim white
         })
         .toBuffer();
