@@ -1,47 +1,44 @@
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
+const { existsSync } = require('fs'); // Added for safety check
 const { spawn } = require('child_process');
 
 class ImageProcessor {
   constructor(config) {
     this.config = config;
+    // We use 'python3' because your terminal says (venv) is active
     this.pythonPath = 'python3'; 
     
-    // '..' moves UP from /src to the project root
+    // This is the fix: go UP from /src to the root to find the script
     this.scriptPath = path.join(__dirname, '..', 'remove_bg.py');
+
+    console.log("--- DEBUG INFO ---");
+    console.log(`Current Dir: ${__dirname}`);
+    console.log(`Looking for Python Script at: ${this.scriptPath}`);
     
-    console.log("--- PATH CHECK ---");
-    console.log(`Looking for script at: ${this.scriptPath}`);
+    if (existsSync(this.scriptPath)) {
+      console.log("✅ Script found!");
+    } else {
+      console.log("❌ Script NOT found at that path.");
+    }
   }
 
-  /**
-   * Main processing function
-   */
   async process(inputBuffer) {
-    const tempInput = path.join(__dirname, `temp_in_${Date.now()}.png`);
-    const tempOutput = path.join(__dirname, `temp_out_${Date.now()}.png`);
+    // Save temp files in the root to keep things simple
+    const tempInput = path.join(__dirname, '..', `temp_in_${Date.now()}.png`);
+    const tempOutput = path.join(__dirname, '..', `temp_out_${Date.now()}.png`);
 
     try {
-      // 1. Save buffer to temp file for Python to read
       await fs.writeFile(tempInput, inputBuffer);
-
-      // 2. Run Python background removal
       await this.runPythonRemoveBg(tempInput, tempOutput);
 
-      // 3. Load the result from Python
       let processedImage = sharp(tempOutput);
-
-      // 4. TRIM: This is crucial. It finds the actual edges of the product
-      // that the Python script made solid.
       const trimmedBuffer = await processedImage.trim().toBuffer();
       const metadata = await sharp(trimmedBuffer).metadata();
 
-      // 5. Create the 2000x2500 Canvas (Light Gray #f2f2f2)
       const canvasWidth = 2000;
       const canvasHeight = 2500;
-      
-      // Scale product to fit 80% of canvas height
       const targetHeight = Math.round(canvasHeight * 0.8);
       const scale = targetHeight / metadata.height;
       const targetWidth = Math.round(metadata.width * scale);
@@ -50,7 +47,6 @@ class ImageProcessor {
         .resize(targetWidth, targetHeight)
         .toBuffer();
 
-      // 6. Create final composition
       return await sharp({
         create: {
           width: canvasWidth,
@@ -67,7 +63,6 @@ class ImageProcessor {
       .toBuffer();
 
     } finally {
-      // Cleanup temp files
       await fs.unlink(tempInput).catch(() => {});
       await fs.unlink(tempOutput).catch(() => {});
     }
@@ -76,15 +71,16 @@ class ImageProcessor {
   runPythonRemoveBg(input, output) {
     return new Promise((resolve, reject) => {
       const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
-      py.stderr.on('data', (data) => console.error(`Python: ${data}`));
+      
+      // Captures actual Python errors so we can see why it fails
+      py.stderr.on('data', (data) => console.error(`Python Error: ${data}`));
+      
       py.on('close', (code) => {
         if (code === 0) resolve();
         else reject(new Error(`Python script failed with code ${code}`));
       });
     });
   }
-
-  // --- HELPER FUNCTIONS REQUIRED BY INDEX.JS ---
 
   async getImageDimensions(buffer) {
     const metadata = await sharp(buffer).metadata();
