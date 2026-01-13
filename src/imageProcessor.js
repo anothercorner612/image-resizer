@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 import path from 'path';
-import { promises as fs } from 'fs';
+import { promises as fs, existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 
