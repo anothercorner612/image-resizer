@@ -182,14 +182,39 @@ export class ProductScaler {
    * Get shadow positioning (at base of product)
    * @param {number} scaledWidth - Scaled product width
    * @param {number} scaledHeight - Scaled product height
+   * @param {string} category - Product category
    * @returns {Object} Shadow dimensions and position
    */
-  getShadowPosition(scaledWidth, scaledHeight) {
+  getShadowPosition(scaledWidth, scaledHeight, category = 'default') {
     const centerPos = this.getCenterPosition(scaledWidth, scaledHeight);
+    const aspectRatio = scaledWidth / scaledHeight;
 
-    // Shadow ellipse dimensions (proportional to product width)
-    const shadowWidth = Math.round(scaledWidth * 0.8);
-    const shadowHeight = Math.round(scaledWidth * 0.15);
+    // Calculate shadow dimensions based on product category and shape
+    let shadowWidth, shadowHeight;
+
+    if (category === 'tall_thin' || aspectRatio < 0.5) {
+      // For tall/thin products (bottles, vases, etc.)
+      // Shadow should be wider than the product base for realism
+      shadowWidth = Math.round(scaledWidth * 1.4); // 140% of product width
+      shadowHeight = Math.round(shadowWidth * 0.15); // Shallow ellipse
+    } else if (category === 'wide' || aspectRatio > 1.5) {
+      // For wide products
+      shadowWidth = Math.round(scaledWidth * 0.85);
+      shadowHeight = Math.round(shadowWidth * 0.12); // Very shallow
+    } else if (category === 'small_accessory') {
+      // For small items
+      shadowWidth = Math.round(scaledWidth * 0.9);
+      shadowHeight = Math.round(shadowWidth * 0.18); // Slightly taller
+    } else {
+      // Default products - use average of width/height for more natural shadow
+      const baseDimension = Math.max(scaledWidth * 0.7, Math.min(scaledWidth, scaledHeight));
+      shadowWidth = Math.round(baseDimension * 0.85);
+      shadowHeight = Math.round(baseDimension * 0.15);
+    }
+
+    // Ensure shadow isn't too small
+    shadowWidth = Math.max(shadowWidth, 100);
+    shadowHeight = Math.max(shadowHeight, 15);
 
     // Position shadow at the base of the product
     const shadowX = Math.round((this.canvasWidth - shadowWidth) / 2);

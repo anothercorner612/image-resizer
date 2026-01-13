@@ -56,15 +56,17 @@ export class ImageProcessor {
       );
       this.scaler.logScalingInfo(scalingInfo);
 
-      // 4. Prepare product image (with or without background removal)
+      // 4. Remove background with AI (if enabled)
       console.log('Preparing product image...');
       let processedProduct;
 
-      if (this.enableBackgroundRemoval && !metadata.hasAlpha) {
-        console.log('⚠️  Note: Basic background cleanup applied (Sharp has limited background removal)');
+      if (this.enableBackgroundRemoval) {
+        // Always run AI background removal if enabled
+        // Product photos often have alpha channels but still have white backgrounds
         processedProduct = await this.cleanupBackground(workingBuffer);
       } else {
         // Use image as-is, just ensure alpha channel
+        console.log('Background removal disabled, using original image');
         processedProduct = await sharp(workingBuffer).ensureAlpha().toBuffer();
       }
 
@@ -80,11 +82,12 @@ export class ImageProcessor {
       console.log('Creating canvas with background...');
       const canvas = await this.createCanvas();
 
-      // 7. Generate contact shadow
+      // 7. Generate contact shadow (category-aware)
       console.log('Generating contact shadow...');
       const shadowBuffer = await this.createContactShadow(
         scalingInfo.scaled.width,
-        scalingInfo.scaled.height
+        scalingInfo.scaled.height,
+        scalingInfo.category
       );
 
       // 8. Get positioning
@@ -135,9 +138,8 @@ export class ImageProcessor {
   }
 
   /**
-   * Auto-trim black bars and letterboxing from images
-   * Removes solid black or white borders before processing
-   * More conservative to avoid removing actual product content
+   * Auto-trim letterboxing and solid borders
+   * Removes black bars and solid white/light borders
    * @param {Buffer} buffer - Input image buffer
    * @returns {Promise<Buffer>} Trimmed image buffer
    */
@@ -145,60 +147,41 @@ export class ImageProcessor {
     try {
       const image = sharp(buffer);
       const metadata = await image.metadata();
+      let didTrim = false;
 
-      // Try trimming with threshold for black borders only
-      // Use lower threshold (2 instead of 10) to be more conservative
-      // Only trim if it's truly solid black/white
-      let trimmedBuffer = await image
-        .trim({
-          threshold: 2, // Very conservative - only pure black/white
-          background: { r: 0, g: 0, b: 0 } // Trim black
-        })
-        .toBuffer();
+      // Try trimming solid black borders (letterboxing)
+      // Use threshold 5 to handle JPEG artifacts
+      try {
+        const trimmedBuffer = await sharp(buffer)
+          .trim({
+            threshold: 5,
+            background: { r: 0, g: 0, b: 0 }
+          })
+          .toBuffer();
 
-      // Check if trimming actually removed significant borders
-      // Require at least 50px removed to prevent accidental trimming of content
-      const trimmedMetadata = await sharp(trimmedBuffer).metadata();
-      const trimmedSignificantly = (
-        (metadata.width - trimmedMetadata.width) > 50 ||
-        (metadata.height - trimmedMetadata.height) > 50
-      );
+        const trimmedMeta = await sharp(trimmedBuffer).metadata();
+        const removed = Math.max(
+          metadata.width - trimmedMeta.width,
+          metadata.height - trimmedMeta.height
+        );
 
-      if (trimmedSignificantly) {
-        console.log(`✓ Trimmed black bars: ${metadata.width}×${metadata.height} → ${trimmedMetadata.width}×${trimmedMetadata.height}`);
-        buffer = trimmedBuffer;
-      } else {
-        console.log('No significant black borders detected');
+        if (removed > 20) {
+          console.log(`✓ Trimmed black letterboxing: ${metadata.width}×${metadata.height} → ${trimmedMeta.width}×${trimmedMeta.height}`);
+          buffer = trimmedBuffer;
+          didTrim = true;
+        }
+      } catch (e) {
+        // Trim failed, continue
       }
 
-      // Also try trimming white borders (only if significant)
-      const currentMetadata = await sharp(buffer).metadata();
-      trimmedBuffer = await sharp(buffer)
-        .trim({
-          threshold: 2,
-          background: { r: 255, g: 255, b: 255 } // Trim white
-        })
-        .toBuffer();
-
-      // Check if white trimming removed something significant
-      const whiteMetadata = await sharp(trimmedBuffer).metadata();
-      const whiteTrimmedSignificantly = (
-        (currentMetadata.width - whiteMetadata.width) > 50 ||
-        (currentMetadata.height - whiteMetadata.height) > 50
-      );
-
-      if (whiteTrimmedSignificantly) {
-        console.log(`✓ Trimmed white borders: ${currentMetadata.width}×${currentMetadata.height} → ${whiteMetadata.width}×${whiteMetadata.height}`);
-        buffer = trimmedBuffer;
-      } else {
-        console.log('No significant white borders detected');
+      if (!didTrim) {
+        console.log('No letterboxing detected');
       }
 
       return buffer;
 
     } catch (error) {
       console.warn('Auto-trim failed, using original image:', error.message);
-      // Return original if trimming fails
       return buffer;
     }
   }
@@ -277,17 +260,22 @@ export class ImageProcessor {
    * Create contact shadow at product base
    * @param {number} productWidth - Scaled product width
    * @param {number} productHeight - Scaled product height
+   * @param {string} category - Product category for shadow sizing
    * @returns {Promise<Buffer>} Shadow buffer
    */
-  async createContactShadow(productWidth, productHeight) {
-    const shadowPos = this.scaler.getShadowPosition(productWidth, productHeight);
+  async createContactShadow(productWidth, productHeight, category = 'default') {
+    const shadowPos = this.scaler.getShadowPosition(productWidth, productHeight, category);
+
+    // Adjust blur based on shadow size for realism
+    // Larger shadows need more blur to look natural
+    const blurAmount = Math.max(12, Math.min(25, shadowPos.width * 0.015));
 
     // Create SVG for elliptical shadow with blur
     const svg = `
       <svg width="${productWidth}" height="${productHeight}">
         <defs>
           <filter id="blur">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="15" />
+            <feGaussianBlur in="SourceGraphic" stdDeviation="${blurAmount}" />
           </filter>
         </defs>
         <ellipse
