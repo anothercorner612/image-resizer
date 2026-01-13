@@ -96,4 +96,4 @@ class ImageProcessor {
   }
 }
 
-module.exports = ImageProcessor;
+export { ImageProcessor };
