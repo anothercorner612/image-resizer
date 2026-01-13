@@ -9,10 +9,29 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export class ImageProcessor {
-  constructor(config) {
+ constructor(config) {
     this.config = config;
-    this.pythonPath = 'python3'; 
-    this.scriptPath = path.join(__dirname, '..', 'remove_bg.py');  }
+
+    // 1. Look for the path in your .env file first. 
+    // If it's not there, just use 'python3'.
+    this.pythonPath = process.env.PYTHON_PATH || 'python3'; 
+
+    // 2. Look for the script in the root folder (one level up from /src)
+    this.scriptPath = path.resolve(__dirname, '..', 'remove_bg.py');
+
+    console.log("--- SYSTEM CHECK ---");
+    console.log(`Python: ${this.pythonPath}`);
+    
+    // 3. Double check if the script is actually there
+    if (existsSync(this.scriptPath)) {
+      console.log(`✅ Script found at: ${this.scriptPath}`);
+    } else {
+      // Fallback: Check if it's inside /src just in case
+      this.scriptPath = path.resolve(__dirname, 'remove_bg.py');
+      console.log(`⚠️  Checking fallback path: ${this.scriptPath}`);
+    }
+    console.log("--------------------");
+  }
 
   // RENAMED from 'process' to 'processImage' to match test_run.js
   async processImage(inputBuffer, context = {}) {
