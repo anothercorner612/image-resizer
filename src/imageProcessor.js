@@ -7,7 +7,12 @@ class ImageProcessor {
   constructor(config) {
     this.config = config;
     this.pythonPath = 'python3'; 
-    this.scriptPath = path.join(__dirname, 'remove_bg.py');
+    
+    // '..' moves UP from /src to the project root
+    this.scriptPath = path.join(__dirname, '..', 'remove_bg.py');
+    
+    console.log("--- PATH CHECK ---");
+    console.log(`Looking for script at: ${this.scriptPath}`);
   }
 
   /**
