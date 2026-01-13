@@ -228,30 +228,10 @@ export class ImageProcessor {
 
       // Convert Blob to Buffer
       const arrayBuffer = await blob.arrayBuffer();
-      let resultBuffer = Buffer.from(arrayBuffer);
+      const resultBuffer = Buffer.from(arrayBuffer);
 
-      // Post-process: Aggressively trim any remaining near-white or near-black edges
-      // This catches residual background the AI might have left behind
-      console.log('Cleaning up edges...');
-      try {
-        // Try trimming near-white pixels (threshold 40 catches light grays)
-        const whiteTrimmed = await sharp(resultBuffer)
-          .trim({ threshold: 40 })
-          .toBuffer();
-
-        const originalMeta = await sharp(resultBuffer).metadata();
-        const trimmedMeta = await sharp(whiteTrimmed).metadata();
-
-        // Only use trimmed version if it actually removed something (at least 10px)
-        if ((originalMeta.width - trimmedMeta.width) > 10 ||
-            (originalMeta.height - trimmedMeta.height) > 10) {
-          console.log(`✓ Trimmed ${originalMeta.width - trimmedMeta.width}px width, ${originalMeta.height - trimmedMeta.height}px height`);
-          resultBuffer = whiteTrimmed;
-        }
-      } catch (trimError) {
-        console.log('Edge cleanup skipped (already clean)');
-      }
-
+      // Don't trim after background removal - the AI already gave us a clean transparent PNG
+      // Trimming here would remove white product content (like white book covers)
       console.log('✓ Background removed successfully');
       return resultBuffer;
 
