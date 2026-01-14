@@ -95,6 +95,43 @@ export class ImageProcessor {
     }
   }
 
+  /**
+   * Remove background from image buffer (testing method)
+   * @param {Buffer} buffer - Input image buffer
+   * @returns {Buffer} - Image buffer with background removed
+   */
+  async cleanupBackground(buffer) {
+    const tempDir = path.join(__dirname, '..', 'temp');
+    const timestamp = Date.now();
+    const inputPath = path.join(tempDir, `input_${timestamp}.png`);
+    const outputPath = path.join(tempDir, `output_${timestamp}.png`);
+
+    try {
+      // Create temp directory if it doesn't exist
+      await fs.mkdir(tempDir, { recursive: true });
+
+      // Write input buffer to temp file
+      await fs.writeFile(inputPath, buffer);
+
+      // Run Python background removal
+      await this.runPythonRemoveBg(inputPath, outputPath);
+
+      // Read result
+      const resultBuffer = await fs.readFile(outputPath);
+
+      // Clean up temp files
+      await fs.unlink(inputPath).catch(() => {});
+      await fs.unlink(outputPath).catch(() => {});
+
+      return resultBuffer;
+    } catch (error) {
+      // Clean up on error
+      await fs.unlink(inputPath).catch(() => {});
+      await fs.unlink(outputPath).catch(() => {});
+      throw error;
+    }
+  }
+
   runPythonRemoveBg(input, output) {
     return new Promise((resolve, reject) => {
       const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
