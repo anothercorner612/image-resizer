@@ -14,53 +14,49 @@ def remove_background(input_path, output_path):
         alpha = data[:, :, 3]
         r, g, b = data[:,:,0].astype(float), data[:,:,1].astype(float), data[:,:,2].astype(float)
 
-        # 1. GENERATE A ROBUST "SCANNER MASK"
-        # Instead of trusting the AI, we define 'background' as anything 
-        # that is very close to pure white (the scanner bed).
-        # We use 250 as the cutoff for 'white'.
-        is_not_white = (r < 250) | (g < 250) | (b < 250)
+        # 1. SCANNER MASK (Anything not pure scanner-white)
+        # We use 252 to be very strict about what counts as 'background'
+        is_not_white = (r < 252) | (g < 252) | (b < 252)
         
-        # 2. THE "BLACK BAR" KILLER
-        # The black bar at the top is usually very dark (low values).
-        # We ignore very dark pixels that are at the very top of the scan.
-        height, width = data.shape[:2]
-        top_bar_zone = int(height * 0.08)
-        is_not_top_black = np.ones_like(is_not_white)
-        is_not_top_black[:top_bar_zone, :] = (r[:top_bar_zone, :] > 50)
+        # 2. INITIAL COMBINED MASK
+        combined_mask = (alpha > 80) | is_not_white
 
-        # 3. COMBINE AI + GEOMETRY
-        # We keep what the AI found OR anything that is clearly not white background.
-        combined_mask = (alpha > 50) | is_not_white
-        
-        # Apply the top-bar filter
-        combined_mask &= is_not_top_black
+        # 3. THE "ISLAND KILLER" (Connectivity Analysis)
+        # This identifies every separate 'blob' in the image.
+        label_im, nb_labels = ndimage.label(combined_mask)
+        if nb_labels > 1:
+            # Find the size of every blob
+            sizes = ndimage.sum(combined_mask, label_im, range(nb_labels + 1))
+            # The largest blob is our product. Everything else is 'dust' or 'bars'.
+            mask_largest = (label_im == np.argmax(sizes))
+        else:
+            mask_largest = combined_mask
 
-        # 4. FIND THE MAIN OBJECT (Centering)
-        # This removes floating "dust" or distant black bars
-        coords = np.argwhere(combined_mask)
+        # 4. HEAL AND FILL
+        # This ensures the envelope stays solid and corners stay sharp
+        final_mask = ndimage.binary_fill_holes(mask_largest)
+        final_mask = ndimage.binary_closing(final_mask, structure=np.ones((3,3)))
+
+        # 5. CROP TO CONTENT (Fixes the "Too Small" / Scaling issue)
+        # We find the exact edges of the product and 'crop' the mask to it
+        coords = np.argwhere(final_mask)
         if coords.size > 0:
             y_min, x_min = coords.min(axis=0)
             y_max, x_max = coords.max(axis=0)
             
-            # Create a mask that only exists within the product's bounds
-            final_mask = np.zeros_like(combined_mask)
-            final_mask[y_min:y_max, x_min:x_max] = combined_mask[y_min:y_max, x_min:x_max]
-        else:
-            final_mask = combined_mask
+            # Wipe everything outside this tight box
+            cleaned_mask = np.zeros_like(final_mask)
+            cleaned_mask[y_min:y_max, x_min:x_max] = final_mask[y_min:y_max, x_min:x_max]
+            
+            # Force a 10px buffer of transparency at the VERY edges of the file
+            # This is the 'handshake' for the .8 scaling to work perfectly
+            cleaned_mask[:10, :] = 0
+            cleaned_mask[-10:, :] = 0
+            cleaned_mask[:, :10] = 0
+            cleaned_mask[:, -10:] = 0
+            final_mask = cleaned_mask
 
-        # 5. HEAL THE ENVELOPE (Closing the gaps)
-        # We fill holes and smooth the edges so white envelopes don't look 'eaten'
-        final_mask = ndimage.binary_fill_holes(final_mask)
-        final_mask = ndimage.binary_closing(final_mask, structure=np.ones((5,5)))
-
-        # 6. FORCE TRANSPARENT BORDER (Fixes the .8 Scaling)
-        # We clear the outer 10 pixels to ensure Sharp sees the object correctly
-        final_mask[:10, :] = 0
-        final_mask[-10:, :] = 0
-        final_mask[:, :10] = 0
-        final_mask[:, -10:] = 0
-
-        # 7. EXPORT
+        # 6. EXPORT
         data[:, :, 3] = (final_mask * 255).astype(np.uint8)
         Image.fromarray(data).save(output_path)
         return 0
