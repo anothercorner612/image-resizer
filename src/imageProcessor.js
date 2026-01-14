@@ -1,49 +1,117 @@
-import sys, os
-import numpy as np
-from PIL import Image
-from scipy import ndimage
-import withoutbg
+import sharp from 'sharp';
+import path from 'path';
+import { promises as fs } from 'fs';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 
-def remove_background(input_path, output_path):
-    try:
-        model = withoutbg.WithoutBG.opensource()
-        result_image = model.remove_background(input_path)
-        img_rgba = result_image.convert("RGBA")
-        data = np.array(img_rgba)
-        
-        alpha = data[:, :, 3]
-        rgb = data[:, :, 0:3]
-        
-        # 1. CORE MASK: Start with what the AI is sure about
-        # We use a lower threshold (50) to catch faint edges
-        mask = (alpha > 50).astype(np.uint8)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-        # 2. THE BOOK-SAVER (Vertical Dilation)
-        # We expand the mask specifically UPWARD. This forces the script
-        # to re-examine the area where the book was "beheaded."
-        structure = np.zeros((20, 1)) 
-        structure[:10, 0] = 1 # Look 10 pixels up
-        refined_mask = ndimage.binary_dilation(mask, structure=structure).astype(np.uint8)
-        
-        # 3. RE-VALIDATE: Only keep the "expanded" pixels if they aren't pure white
-        # This prevents the mask from just growing into the empty background
-        r, g, b = rgb[:,:,0], rgb[:,:,1], rgb[:,:,2]
-        is_not_pure_white = (r < 245) | (g < 245) | (b < 245)
-        
-        final_mask = np.where(refined_mask & is_not_pure_white, 1, mask)
-        
-        # 4. HOLE FILLING
-        # Closes the gaps in the 'Cycling Lexicon' and 'Thank You' card
-        final_mask = ndimage.binary_fill_holes(final_mask).astype(np.uint8)
+export class ImageProcessor {
+  constructor(config) {
+    this.config = config;
+    this.pythonPath = process.env.PYTHON_PATH || 'python3';
+    // Path is now fixed to the root folder
+    this.scriptPath = path.resolve(__dirname, '..', 'remove_bg.py');
+  }
 
-        # 5. FINAL RECONSTRUCT
-        data[:, :, 3] = (final_mask * 255).astype(np.uint8)
-        Image.fromarray(data).save(output_path)
-        return 0
-    except Exception as e:
-        print(f"Error: {e}")
-        return 1
+  /**
+   * Main processing pipeline: Remove BG -> Trim -> Resize to Fit -> Composite
+   */
+  async processImage(inputBuffer, context = {}) {
+    const tempInput = path.join(__dirname, `temp_in_${Date.now()}.png`);
+    const tempOutput = path.join(__dirname, `temp_out_${Date.now()}.png`);
 
-if __name__ == "__main__":
-    if len(sys.argv) == 3:
-        sys.exit(remove_background(sys.argv[1], sys.argv[2]))
+    try {
+      // 1. Prepare files for Python
+      await fs.writeFile(tempInput, inputBuffer);
+
+      // 2. Remove Background via Python
+      console.log(`[DEBUG] Step 2: Running Python background removal for ${context.title || 'image'}...`);
+      await this.runPythonRemoveBg(tempInput, tempOutput);
+
+      // 3. Trim whitespace and get dimensions
+      const trimmedBuffer = await sharp(tempOutput).trim().toBuffer();
+      const metadata = await sharp(trimmedBuffer).metadata();
+
+      // 4. Calculate Canvas Scaling (Ensures image never exceeds canvas bounds)
+      const canvasWidth = parseInt(this.config.canvasWidth) || 2000;
+      const canvasHeight = parseInt(this.config.canvasHeight) || 2500;
+      const maxAllowedWidth = Math.round(canvasWidth * 0.85); // 85% safety margin
+      const maxAllowedHeight = Math.round(canvasHeight * 0.85);
+
+      let targetHeight = maxAllowedHeight;
+      let scale = targetHeight / metadata.height;
+      let targetWidth = Math.round(metadata.width * scale);
+
+      // Width-check: If product is too wide, scale based on width instead
+      if (targetWidth > maxAllowedWidth) {
+        targetWidth = maxAllowedWidth;
+        scale = targetWidth / metadata.width;
+        targetHeight = Math.round(metadata.height * scale);
+      }
+
+      // 5. Resize and Composite onto final canvas
+      const resizedProduct = await sharp(trimmedBuffer)
+        .resize(targetWidth, targetHeight)
+        .toBuffer();
+
+      const finalBuffer = await sharp({
+        create: {
+          width: canvasWidth,
+          height: canvasHeight,
+          channels: 4,
+          background: this.config.backgroundColor || '#f3f3f4'
+        }
+      })
+      .composite([{
+        input: resizedProduct,
+        gravity: 'center'
+      }])
+      .webp({ quality: 92 })
+      .toBuffer();
+
+      return {
+        buffer: finalBuffer,
+        scalingInfo: {
+          scaleFactor: scale,
+          originalSize: { width: metadata.width, height: metadata.height },
+          targetSize: { width: targetWidth, height: targetHeight }
+        }
+      };
+
+    } catch (error) {
+      console.error(`[DEBUG] Error in ImageProcessor:`, error.message);
+      throw error;
+    } finally {
+      // Cleanup temp files immediately
+      await Promise.all([
+        fs.unlink(tempInput).catch(() => {}),
+        fs.unlink(tempOutput).catch(() => {})
+      ]);
+    }
+  }
+
+  runPythonRemoveBg(input, output) {
+    return new Promise((resolve, reject) => {
+      const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
+
+      py.stderr.on('data', (data) => console.log(`[PYTHON]: ${data}`));
+      py.stdout.on('data', (data) => console.log(`[PYTHON]: ${data}`));
+
+      py.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Python script failed with code ${code}`));
+      });
+    });
+  }
+
+  async isValidImage(buffer) {
+    try {
+      await sharp(buffer).metadata();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+}
