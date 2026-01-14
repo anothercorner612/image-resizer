@@ -10,7 +10,7 @@ import os
 import numpy as np
 from PIL import Image, ImageFilter
 from scipy import ndimage
-from withoutbg import WithoutBG
+from withoutbg.withoutbg import WithoutBG
 
 def remove_background(input_path, output_path):
     """
