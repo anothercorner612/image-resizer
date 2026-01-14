@@ -10,7 +10,8 @@ import os
 import numpy as np
 from PIL import Image, ImageFilter
 from scipy import ndimage
-from withoutbg import withoutbg
+import withoutbg
+
 def remove_background(input_path, output_path):
     """
     Remove background from image using withoutbg with advanced alpha channel processing
@@ -35,8 +36,8 @@ def remove_background(input_path, output_path):
 
         # Initialize withoutbg with opensource models
         print(f"Initializing withoutbg opensource model...", file=sys.stderr)
-        model = withoutbg.opensource()
-
+        model = withoutbg.WithoutBG.opensource()
+        
         print(f"Processing: {input_path}", file=sys.stderr)
         result_image = model.remove_background(input_path)
         img_rgba = result_image.convert("RGBA")
