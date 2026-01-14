@@ -47,7 +47,7 @@ class TestRunner {
       const allProducts = await this.shopify.getAllProducts();
       
       // For this test run, we'll just process the first few found
-      const examples = allProducts.slice(0, perCategory * 4); 
+      const examples = allProducts.slice(0, perCategory * 7); 
 
       if (examples.length === 0) {
         console.log('No products found in Shopify!');
