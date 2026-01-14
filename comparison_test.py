@@ -1,83 +1,74 @@
 import sys, os, io
 import numpy as np
 import cv2
-from PIL import Image, ImageCms
+from PIL import Image
+from pathlib import Path
 
-# Ensure output directory exists
-os.makedirs("test_results", exist_ok=True)
+# Setup output root
+OUTPUT_ROOT = "test_results"
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
-def save_result(name, data):
-    print(f"✅ Generated: {name}")
-    Image.fromarray(data).save(os.path.join("test_results", f"{name}.png"))
-
-def run_comparison(input_path):
-    print(f"🚀 Running EDGE-BASED comparison for: {input_path}")
-    
-    # 1. LOAD ORIGINAL
+def process_logic(input_path, save_folder):
+    """The core 21-version logic engine"""
     pil_img = Image.open(input_path).convert("RGBA")
     original_np = np.array(pil_img)
     rgb = original_np[:, :, :3]
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    height, width = gray.shape
 
-    # --- OPTION 1: Sharp Edge Detection (The 'Ladder' Fix) ---
-    # Finds the sharp outlines of the ladder
-    edges = cv2.Canny(gray, 100, 200)
-    kernel = np.ones((3,3), np.uint8)
-    dilated = cv2.dilate(edges, kernel, iterations=1)
-    
-    opt1 = original_np.copy()
-    opt1[:, :, 3] = dilated
-    save_result("01_canny_edges", opt1)
+    def save_v(name, alpha_channel):
+        res = original_np.copy()
+        res[:, :, 3] = alpha_channel
+        Image.fromarray(res).save(os.path.join(save_folder, f"{name}.png"))
 
-    # --- OPTION 2: Thickened Outlines ---
-    # Better for thin rungs that the AI usually deletes
-    thick_kernel = np.ones((5,5), np.uint8)
-    thick_edges = cv2.dilate(edges, thick_kernel, iterations=2)
-    opt2 = original_np.copy()
-    opt2[:, :, 3] = thick_edges
-    save_result("02_thick_outlines", opt2)
+    # --- 1-10: DYNAMIC THRESHOLD RANGE (0-255 focus) ---
+    # We test every 5 steps in the 'high white' range
+    for val in range(200, 250, 5):
+        _, t = cv2.threshold(gray, val, 255, cv2.THRESH_BINARY_INV)
+        save_v(f"01_thresh_gray_{val}", t)
 
-    # --- OPTION 3: Threshold Masking ---
-    # Good for high-contrast illustrations
-    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-    opt3 = original_np.copy()
-    opt3[:, :, 3] = thresh
-    save_result("03_threshold_inverse", opt3)
+    # --- 11-15: SATURATION PROTECTION (Saves White Products) ---
+    # This ignores brightness and looks for 'color'
+    for s_val in [2, 5, 10, 15, 20]:
+        _, s_mask = cv2.threshold(hsv[:,:,1], s_val, 255, cv2.THRESH_BINARY)
+        save_v(f"02_sat_protect_{s_val}", s_mask)
 
-    # --- OPTION 4: Adaptive Mean Thresholding ---
-    # Handles shadows better than standard thresholding
-    adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-    opt4 = original_np.copy()
-    opt4[:, :, 3] = adaptive
-    save_result("04_adaptive_edges", opt4)
+    # --- 16-18: ADAPTIVE BLOCKING (Handles shadows/gradients) ---
+    for block in [11, 31, 71]:
+        t_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 2)
+        save_v(f"03_adaptive_block_{block}", t_adapt)
 
-    # --- OPTION 5: Saliency Map (What 'Stands Out') ---
-    saliency = cv2.saliency.StaticSaliencyFineGrained_create()
-    success, saliency_map = saliency.computeSaliency(rgb)
-    saliency_map = (saliency_map * 255).astype("uint8")
-    _, sal_thresh = cv2.threshold(saliency_map, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    
-    opt5 = original_np.copy()
-    opt5[:, :, 3] = sal_thresh
-    save_result("05_saliency_map", opt5)
+    # --- 19-21: FLOODFILL 'MAGIC WAND' (Corner logic) ---
+    # Prevents white parts inside the ladder from being deleted
+    for diff in [2, 5, 8]:
+        f_mask = np.zeros((height + 2, width + 2), np.uint8)
+        # Click all 4 corners
+        for pt in [(0,0), (width-1, 0), (0, height-1), (width-1, height-1)]:
+            cv2.floodFill(rgb.copy(), f_mask, pt, (255,255,255), (diff,)*3, (diff,)*3, 8)
+        final_f = np.where(f_mask[1:-1, 1:-1] == 1, 0, 255).astype(np.uint8)
+        save_v(f"04_floodfill_diff_{diff}", final_f)
 
-    # --- OPTION 6: GrabCut (Manual Seed) ---
-    # We tell the computer the center 80% is definitely the product
-    mask = np.zeros(rgb.shape[:2], np.uint8)
-    bgdModel = np.zeros((1, 65), np.float64)
-    fgdModel = np.zeros((1, 65), np.float64)
-    rect = (int(rgb.shape[1]*0.1), int(rgb.shape[0]*0.1), int(rgb.shape[1]*0.8), int(rgb.shape[0]*0.8))
-    cv2.grabCut(rgb, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
-    mask2 = np.where((mask==2)|(mask==0), 0, 1).astype('uint8')
-    
-    opt6 = original_np.copy()
-    opt6[:, :, 3] = mask2 * 255
-    save_result("06_grabcut_center", opt6)
+def run_comparison(target_path):
+    if os.path.isdir(target_path):
+        print(f"📂 Batch Mode: Processing folder {target_path}")
+        extensions = ('.jpg', '.jpeg', '.png', '.webp')
+        images = [f for f in os.listdir(target_path) if f.lower().endswith(extensions)]
+        for img in images:
+            img_path = os.path.join(target_path, img)
+            save_subfolder = os.path.join(OUTPUT_ROOT, Path(img).stem)
+            os.makedirs(save_subfolder, exist_ok=True)
+            process_logic(img_path, save_subfolder)
+    else:
+        print(f"📸 Single Mode: Processing {target_path}")
+        save_subfolder = os.path.join(OUTPUT_ROOT, Path(target_path).stem)
+        os.makedirs(save_subfolder, exist_ok=True)
+        process_logic(target_path, save_subfolder)
 
-    print("\n🏁 DONE! Check the 'test_results' folder.")
+    print(f"\n🏁 Finished! Results are in '{OUTPUT_ROOT}'")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         run_comparison(sys.argv[1])
     else:
-        print("Usage: python comparison_test.py path/to/image.webp")
+        print("Usage: python comparison_test.py [path_to_image_OR_folder]")
