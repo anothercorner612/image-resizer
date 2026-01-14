@@ -21,63 +21,59 @@ def process_logic(input_path, save_folder):
         res[:, :, 3] = alpha_channel
         Image.fromarray(res).save(os.path.join(save_folder, f"{name}.png"))
 
-    # --- 1-5: REFINED THRESHOLDS (Tight Steps) ---
+    # --- 1-5: REFINED THRESHOLDS ---
     for val in [230, 238, 242, 246, 250]:
         _, t = cv2.threshold(gray, val, 255, cv2.THRESH_BINARY_INV)
         save_v(f"01_thresh_{val}", t)
 
-    # --- 6-9: THE "CHROMA" FILTERS (Ignoring Lightness) ---
-    # These focus ONLY on color. Great for the ladder illustration.
+    # --- 6-9: CHROMA/COLOR FILTERS ---
     l, a, b_chan = cv2.split(lab)
-    _, a_t = cv2.threshold(cv2.absdiff(a, 128), 10, 255, cv2.THRESH_BINARY) # Color vs Neutral
-    _, b_t = cv2.threshold(cv2.absdiff(b_chan, 128), 10, 255, cv2.THRESH_BINARY)
+    _, a_t = cv2.threshold(cv2.absdiff(a, 128), 8, 255, cv2.THRESH_BINARY)
+    _, b_t = cv2.threshold(cv2.absdiff(b_chan, 128), 8, 255, cv2.THRESH_BINARY)
     chroma_mask = cv2.bitwise_or(a_t, b_t)
     save_v("02_chroma_presence_mask", chroma_mask)
 
-    # --- 10-13: FLOODFILL WITH GRADIENT BARRIERS ---
-    # This prevents the 'leak' by creating a thin wall of edges
+    # --- 10-13: EDGE-BLOCK FLOODFILL ---
     edges = cv2.Canny(gray, 30, 100)
     dilated_edges = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
-    
-    for d in [4, 8, 12]:
+    for d in [5, 12]:
         f_m = np.zeros((height + 2, width + 2), np.uint8)
-        # We fill an image that has the edges 'burned' into it
         temp_rgb = rgb.copy()
         temp_rgb[dilated_edges == 255] = [0, 0, 0] 
         cv2.floodFill(temp_rgb, f_m, (0,0), (255,255,255), (d,)*3, (d,)*3, 8)
         save_v(f"03_edge_blocked_flood_{d}", np.where(f_m[1:-1, 1:-1] == 1, 0, 255).astype(np.uint8))
 
-    # --- 14-16: HYBRID: SATURATION + GRAY THRESHOLD ---
-    # Only removes pixels if they are BOTH bright AND colorless
-    sat_mask = cv2.threshold(hsv[:,:,1], 8, 255, cv2.THRESH_BINARY)[1]
-    for g_v in [240, 248]:
+    # --- 14-16: SAT-GRAY HYBRID ---
+    sat_mask = cv2.threshold(hsv[:,:,1], 6, 255, cv2.THRESH_BINARY)[1]
+    for g_v in [235, 245]:
         gray_mask = cv2.threshold(gray, g_v, 255, cv2.THRESH_BINARY_INV)[1]
-        hybrid = cv2.bitwise_or(gray_mask, sat_mask)
-        save_v(f"04_hybrid_sat_gray_{g_v}", hybrid)
+        save_v(f"04_hybrid_sat_gray_{g_v}", cv2.bitwise_or(gray_mask, sat_mask))
 
-    # --- 17-19: MORPHOLOGICAL "HOLE FILLING" ---
-    # Good for ladders where the AI misses the middle of a rung
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
-    _, base_t = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-    closed = cv2.morphologyEx(base_t, cv2.MORPH_CLOSE, kernel)
-    save_v("05_morph_closed_5x5", closed)
+    # --- 17-18: MORPHOLOGY ---
+    kernel = np.ones((5,5), np.uint8)
+    _, base_t = cv2.threshold(gray, 242, 255, cv2.THRESH_BINARY_INV)
+    save_v("05_morph_closed", cv2.morphologyEx(base_t, cv2.MORPH_CLOSE, kernel))
 
-    # --- 20-22: MULTI-LEVEL SALIENCY ---
-    # Tries to find 'objects' based on contrast and color patterns
-    saliency = cv2.saliency.StaticSaliencySpectralResidual_create()
-    success, s_map = saliency.computeSaliency(rgb)
-    s_map = (s_map * 255).astype("uint8")
-    save_v("06_saliency_raw", s_map)
-    _, s_t = cv2.threshold(s_map, 10, 255, cv2.THRESH_BINARY)
-    save_v("06_saliency_thresh", s_t)
-
-    # --- 23-25: THE "CORNER-COLOR" REMOVER ---
-    # Samples the top-left pixel color and removes everything similar to it
+    # --- 19-21: COLOR DISTANCE ---
     bg_color = rgb[5, 5].astype(float)
     diff = np.sqrt(np.sum((rgb.astype(float) - bg_color)**2, axis=2))
-    for tol in [15, 30, 45]:
-        mask = np.where(diff > tol, 255, 0).astype(np.uint8)
-        save_v(f"07_color_distance_tol_{tol}", mask)
+    for tol in [20, 40]:
+        save_v(f"06_color_dist_tol_{tol}", np.where(diff > tol, 255, 0).astype(np.uint8))
+
+    # --- 22-23: SOBEL EDGE HYBRID (New Replace for Saliency) ---
+    # Good for finding the 'texture' of the ladder rungs
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobel_combined = cv2.magnitude(sobelx, sobely)
+    sobel_norm = cv2.normalize(sobel_combined, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _, sobel_t = cv2.threshold(sobel_norm, 20, 255, cv2.THRESH_BINARY)
+    save_v("07_sobel_texture_mask", sobel_t)
+
+    # --- 24-25: THE "SHADOW PROTECTOR" ---
+    # Targets darker 'ink' lines to prevent them from becoming transparent
+    _, shadow_mask = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+    final_shadow = cv2.bitwise_or(base_t, shadow_mask)
+    save_v("08_shadow_ink_protection", final_shadow)
 
 def run_comparison(target_path):
     if os.path.isdir(target_path):
@@ -94,3 +90,4 @@ def run_comparison(target_path):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1: run_comparison(sys.argv[1])
+    else: print("Usage: python comparison_test.py [path]")
