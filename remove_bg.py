@@ -12,45 +12,53 @@ def remove_background(input_path, output_path):
         data = np.array(img_rgba)
         
         alpha = data[:, :, 3]
-        r, g, b = data[:,:,0], data[:,:,1], data[:,:,2]
+        r, g, b = data[:,:,0].astype(float), data[:,:,1].astype(float), data[:,:,2].astype(float)
 
-        # --- ADJUSTMENT 1: BRIGHTNESS PROTECTION ---
-        # Increased to 85 to protect light-colored cards/envelopes
-        brightness = (0.299 * r + 0.587 * g + 0.114 * b)
+        # 1. GENERATE A ROBUST "SCANNER MASK"
+        # Instead of trusting the AI, we define 'background' as anything 
+        # that is very close to pure white (the scanner bed).
+        # We use 250 as the cutoff for 'white'.
+        is_not_white = (r < 250) | (g < 250) | (b < 250)
         
-        # --- ADJUSTMENT 2: CORE MASK THRESHOLD ---
-        # Dropped Alpha to 70 to keep soft white edges
-        mask = (alpha > 70) | ((brightness < 85) & (alpha > 30))
-
-        # 3. GEOMETRIC LOCK
-        coords = np.argwhere(mask)
-        if coords.size > 0:
-            x_min, x_max = coords[:, 1].min(), coords[:, 1].max()
-            x_min = max(0, x_min - 15)
-            x_max = min(data.shape[1], x_max + 15)
-        else:
-            x_min, x_max = 0, data.shape[1]
-
-        # 4. ENVELOPE / WHITE EDGE RECOVERY
+        # 2. THE "BLACK BAR" KILLER
+        # The black bar at the top is usually very dark (low values).
+        # We ignore very dark pixels that are at the very top of the scan.
         height, width = data.shape[:2]
-        top_zone = int(height * 0.40) # Look even further down for recovery
-        
-        # --- ADJUSTMENT 3: RECOVERY SENSITIVITY ---
-        # Changed to 253 - captures everything except the most "pure" white
-        not_bg_white = (r < 253) & (g < 253) & (b < 253)
-        
-        for col in range(x_min, x_max):
-            if np.any(mask[top_zone:top_zone+250, col]): 
-                mask[:top_zone, col] |= not_bg_white[:top_zone, col]
+        top_bar_zone = int(height * 0.08)
+        is_not_top_black = np.ones_like(is_not_white)
+        is_not_top_black[:top_bar_zone, :] = (r[:top_bar_zone, :] > 50)
 
-        # 5. STRUCTURAL CLEANUP
-        mask = ndimage.binary_fill_holes(mask)
-        # Smaller structure preserves sharp corners of the envelope
-        mask = ndimage.binary_closing(mask, structure=np.ones((2,2)))
+        # 3. COMBINE AI + GEOMETRY
+        # We keep what the AI found OR anything that is clearly not white background.
+        combined_mask = (alpha > 50) | is_not_white
+        
+        # Apply the top-bar filter
+        combined_mask &= is_not_top_black
 
-        # 6. CANVAS CLEANER (Ensures the .8 scaling works)
-        final_mask = np.zeros_like(mask)
-        final_mask[5:-5, x_min+2:x_max-2] = mask[5:-5, x_min+2:x_max-2]
+        # 4. FIND THE MAIN OBJECT (Centering)
+        # This removes floating "dust" or distant black bars
+        coords = np.argwhere(combined_mask)
+        if coords.size > 0:
+            y_min, x_min = coords.min(axis=0)
+            y_max, x_max = coords.max(axis=0)
+            
+            # Create a mask that only exists within the product's bounds
+            final_mask = np.zeros_like(combined_mask)
+            final_mask[y_min:y_max, x_min:x_max] = combined_mask[y_min:y_max, x_min:x_max]
+        else:
+            final_mask = combined_mask
+
+        # 5. HEAL THE ENVELOPE (Closing the gaps)
+        # We fill holes and smooth the edges so white envelopes don't look 'eaten'
+        final_mask = ndimage.binary_fill_holes(final_mask)
+        final_mask = ndimage.binary_closing(final_mask, structure=np.ones((5,5)))
+
+        # 6. FORCE TRANSPARENT BORDER (Fixes the .8 Scaling)
+        # We clear the outer 10 pixels to ensure Sharp sees the object correctly
+        final_mask[:10, :] = 0
+        final_mask[-10:, :] = 0
+        final_mask[:, :10] = 0
+        final_mask[:, -10:] = 0
 
         # 7. EXPORT
         data[:, :, 3] = (final_mask * 255).astype(np.uint8)
