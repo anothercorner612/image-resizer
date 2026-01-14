@@ -65,7 +65,7 @@ def remove_background(input_path, output_path):
         final_image = Image.fromarray(data)
         
         # Subtle Gaussian blur to smooth the anti-aliased edges
-        final_image = final_image.filter(ImageFilter.GaussianBlur(radius=0.2))
+        final_image = final_image.filter(ImageFilter.GaussianBlur(radius=0.1))
 
         final_image.save(output_path)
         return 0
