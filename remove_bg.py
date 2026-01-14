@@ -7,45 +7,40 @@ import withoutbg
 def remove_background(input_path, output_path):
     try:
         model = withoutbg.WithoutBG.opensource()
+        # Trust the AI for the initial cut - it's usually best at text
         result_image = model.remove_background(input_path)
         img_rgba = result_image.convert("RGBA")
         data = np.array(img_rgba)
         
         alpha = data[:, :, 3]
-        # Use float for precision math
-        r, g, b = data[:,:,0].astype(float), data[:,:,1].astype(float), data[:,:,2].astype(float)
 
-        # 1. SCANNER-WHITE REJECTION (Strict)
-        is_not_white = (r < 251) | (g < 251) | (b < 251)
+        # 1. KILL THE BLACK BARS (Top 8% and Bottom 8%)
+        # This is a 'dumb' geometric cut. It simply forces the top/bottom 
+        # edges to be transparent, which usually catches the scanner lid bars.
+        height, width = data.shape[:2]
+        margin = int(height * 0.08)
         
-        # 2. THE SOLIDIFIER (Fixes blur/fuzziness on white covers)
-        # If it's not scanner-white AND the AI thinks it's likely foreground,
-        # we force it to be 100% solid (255). This removes the 'haze'.
-        mask = (alpha > 80) | is_not_white
-        mask = ndimage.binary_fill_holes(mask)
+        # We only wipe the margin if the AI left something 'noisy' there
+        cleaned_alpha = alpha.copy()
+        cleaned_alpha[:margin, :] = 0
+        cleaned_alpha[-margin:, :] = 0
 
-        # 3. THE "ISLAND KILLER"
-        label_im, nb_labels = ndimage.label(mask)
-        if nb_labels > 1:
-            sizes = ndimage.sum(mask, label_im, range(nb_labels + 1))
-            mask = (label_im == np.argmax(sizes))
+        # 2. THE "GUTTER" (For the .8 Scaling Handshake)
+        # We force a 15px border on the sides to ensure the JS 'trim' works
+        cleaned_alpha[:, :15] = 0
+        cleaned_alpha[:, -15:] = 0
 
-        # 4. EDGE SHARPENING
-        # Instead of 'Closing' (which blurs), we use a tiny bit of 'Erosion' 
-        # followed by 'Dilation' to snap the edges to the text.
-        mask = ndimage.binary_opening(mask, structure=np.ones((2,2)))
+        # 3. HOLE FILLING (Internal Only)
+        # This fixes the 'Swiss Cheese' effect inside the book 
+        # without touching the outer edges.
+        final_mask = ndimage.binary_fill_holes(cleaned_alpha > 0)
+        
+        # Apply the filled mask back to the alpha channel
+        # This ensures the interior is 255 (solid) and the edges are smooth
+        alpha_final = np.where(final_mask, 255, 0).astype(np.uint8)
 
-        # 5. CONVERT TO HARD ALPHA (No semi-transparency)
-        final_alpha = (mask * 255).astype(np.uint8)
-
-        # 6. THE GUTTER (For scaling)
-        final_alpha[:15, :] = 0
-        final_alpha[-15:, :] = 0
-        final_alpha[:, :15] = 0
-        final_alpha[:, -15:] = 0
-
-        # 7. EXPORT
-        data[:, :, 3] = final_alpha
+        # 4. EXPORT
+        data[:, :, 3] = alpha_final
         Image.fromarray(data).save(output_path)
         return 0
 
