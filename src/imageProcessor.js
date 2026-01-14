@@ -1,62 +1,57 @@
 import sharp from 'sharp';
 import path from 'path';
-import { promises as fs, existsSync } from 'fs';
+import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 
-// Fix for __dirname in ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export class ImageProcessor {
- constructor(config) {
+  constructor(config) {
     this.config = config;
-
-    // 1. Look for the path in your .env file first. 
-    // If it's not there, just use 'python3'.
-    this.pythonPath = process.env.PYTHON_PATH || 'python3'; 
-
-    // 2. Look for the script in the root folder (one level up from /src)
+    this.pythonPath = process.env.PYTHON_PATH || 'python3';
+    // Path is now fixed to the root folder
     this.scriptPath = path.resolve(__dirname, '..', 'remove_bg.py');
-
-    console.log("--- SYSTEM CHECK ---");
-    console.log(`Python: ${this.pythonPath}`);
-    
-    // 3. Double check if the script is actually there
-    if (existsSync(this.scriptPath)) {
-      console.log(`✅ Script found at: ${this.scriptPath}`);
-    } else {
-      // Fallback: Check if it's inside /src just in case
-      this.scriptPath = path.resolve(__dirname, 'remove_bg.py');
-      console.log(`⚠️  Checking fallback path: ${this.scriptPath}`);
-    }
-    console.log("--------------------");
   }
 
-  // RENAMED from 'process' to 'processImage' to match test_run.js
+  /**
+   * Main processing pipeline: Remove BG -> Trim -> Resize to Fit -> Composite
+   */
   async processImage(inputBuffer, context = {}) {
-    console.log(`[DEBUG] Step 1: Writing temp files for ${context.title || 'image'}...`);
     const tempInput = path.join(__dirname, `temp_in_${Date.now()}.png`);
     const tempOutput = path.join(__dirname, `temp_out_${Date.now()}.png`);
 
     try {
+      // 1. Prepare files for Python
       await fs.writeFile(tempInput, inputBuffer);
 
-      console.log(`[DEBUG] Step 2: Running Python background removal...`);
+      // 2. Remove Background via Python
+      console.log(`[DEBUG] Step 2: Running Python background removal for ${context.title || 'image'}...`);
       await this.runPythonRemoveBg(tempInput, tempOutput);
 
-      console.log(`[DEBUG] Step 3: Sharp processing (trim/resize/canvas)...`);
-      let processedImage = sharp(tempOutput);
-      const trimmedBuffer = await processedImage.trim().toBuffer();
+      // 3. Trim whitespace and get dimensions
+      const trimmedBuffer = await sharp(tempOutput).trim().toBuffer();
       const metadata = await sharp(trimmedBuffer).metadata();
 
+      // 4. Calculate Canvas Scaling (Ensures image never exceeds canvas bounds)
       const canvasWidth = parseInt(this.config.canvasWidth) || 2000;
       const canvasHeight = parseInt(this.config.canvasHeight) || 2500;
-      
-      const targetHeight = Math.round(canvasHeight * 0.8);
-      const scale = targetHeight / metadata.height;
-      const targetWidth = Math.round(metadata.width * scale);
+      const maxAllowedWidth = Math.round(canvasWidth * 0.85); // 85% safety margin
+      const maxAllowedHeight = Math.round(canvasHeight * 0.85);
 
+      let targetHeight = maxAllowedHeight;
+      let scale = targetHeight / metadata.height;
+      let targetWidth = Math.round(metadata.width * scale);
+
+      // Width-check: If product is too wide, scale based on width instead
+      if (targetWidth > maxAllowedWidth) {
+        targetWidth = maxAllowedWidth;
+        scale = targetWidth / metadata.width;
+        targetHeight = Math.round(metadata.height * scale);
+      }
+
+      // 5. Resize and Composite onto final canvas
       const resizedProduct = await sharp(trimmedBuffer)
         .resize(targetWidth, targetHeight)
         .toBuffer();
@@ -73,10 +68,9 @@ export class ImageProcessor {
         input: resizedProduct,
         gravity: 'center'
       }])
-      .webp({ quality: 85 }) // Matching the expected output format
+      .webp({ quality: 85 })
       .toBuffer();
 
-      // Return the object format that test_run.js expects for its results
       return {
         buffer: finalBuffer,
         scalingInfo: {
@@ -90,53 +84,18 @@ export class ImageProcessor {
       console.error(`[DEBUG] Error in ImageProcessor:`, error.message);
       throw error;
     } finally {
-      await fs.unlink(tempInput).catch(() => {});
-      await fs.unlink(tempOutput).catch(() => {});
-    }
-  }
-
-  /**
-   * Remove background from image buffer (testing method)
-   * @param {Buffer} buffer - Input image buffer
-   * @returns {Buffer} - Image buffer with background removed
-   */
-  async cleanupBackground(buffer) {
-    const tempDir = path.join(__dirname, '..', 'temp');
-    const timestamp = Date.now();
-    const inputPath = path.join(tempDir, `input_${timestamp}.png`);
-    const outputPath = path.join(tempDir, `output_${timestamp}.png`);
-
-    try {
-      // Create temp directory if it doesn't exist
-      await fs.mkdir(tempDir, { recursive: true });
-
-      // Write input buffer to temp file
-      await fs.writeFile(inputPath, buffer);
-
-      // Run Python background removal
-      await this.runPythonRemoveBg(inputPath, outputPath);
-
-      // Read result
-      const resultBuffer = await fs.readFile(outputPath);
-
-      // Clean up temp files
-      await fs.unlink(inputPath).catch(() => {});
-      await fs.unlink(outputPath).catch(() => {});
-
-      return resultBuffer;
-    } catch (error) {
-      // Clean up on error
-      await fs.unlink(inputPath).catch(() => {});
-      await fs.unlink(outputPath).catch(() => {});
-      throw error;
+      // Cleanup temp files immediately
+      await Promise.all([
+        fs.unlink(tempInput).catch(() => {}),
+        fs.unlink(tempOutput).catch(() => {})
+      ]);
     }
   }
 
   runPythonRemoveBg(input, output) {
     return new Promise((resolve, reject) => {
       const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
-      
-      // Capture Python errors or print statements
+
       py.stderr.on('data', (data) => console.log(`[PYTHON]: ${data}`));
       py.stdout.on('data', (data) => console.log(`[PYTHON]: ${data}`));
 
@@ -145,11 +104,6 @@ export class ImageProcessor {
         else reject(new Error(`Python script failed with code ${code}`));
       });
     });
-  }
-
-  async getImageDimensions(buffer) {
-    const metadata = await sharp(buffer).metadata();
-    return { width: metadata.width, height: metadata.height };
   }
 
   async isValidImage(buffer) {
