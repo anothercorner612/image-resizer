@@ -15,40 +15,40 @@ def remove_background(input_path, output_path):
         rgb = data[:, :, 0:3]
         r, g, b = rgb[:,:,0], rgb[:,:,1], rgb[:,:,2]
 
-        # 1. THE CORE MASK (High threshold to avoid shadow-blocks)
-        mask = (alpha > 125)
+        # 1. BASE MASK (Ignore light shadows)
+        mask = (alpha > 130) 
 
-        # 2. THE "GLUE" STEP (Prevents accidental cropping)
-        # We temporarily expand the mask to join parts of the book that 
-        # might be separated by a thin line of white or text.
-        glued_mask = ndimage.binary_dilation(mask, iterations=5)
-
-        # 3. COMPONENT ANALYSIS (Island Removal)
-        label_im, nb_labels = ndimage.label(glued_mask)
-        
-        if nb_labels > 1:
-            sizes = ndimage.sum(glued_mask, label_im, range(nb_labels + 1))
-            largest_label = np.argmax(sizes)
-            # We keep the area belonging to the largest island
-            keep_area = (label_im == largest_label)
-            # Apply that "keep area" back to our original sharp mask
-            final_mask = mask & keep_area
+        # 2. FIND THE HORIZONTAL LIMITS (The "Geometric Lock")
+        # This finds the leftmost and rightmost pixel of the actual book body
+        coords = np.argwhere(mask)
+        if coords.size > 0:
+            x_min, x_max = coords[:, 1].min(), coords[:, 1].max()
+            # Add a tiny 5px buffer
+            x_min = max(0, x_min - 5)
+            x_max = min(data.shape[1], x_max + 5)
         else:
-            final_mask = mask
+            x_min, x_max = 0, data.shape[1]
 
-        # 4. RE-ADD THE TOP EDGES (The White-on-White Fix)
+        # 3. SELECTIVE TOP RECOVERY (Fixes White Blocks)
         height, width = data.shape[:2]
-        top_zone = int(height * 0.2)
-        not_pure_white = (r < 252) & (g < 252) & (b < 252)
+        top_zone = int(height * 0.20)
+        not_pure_white = (r < 250) & (g < 250) & (b < 250)
         
-        for col in range(width):
-            if np.any(final_mask[top_zone:top_zone+150, col]): 
-                final_mask[:top_zone, col] |= not_pure_white[:top_zone, col]
+        for col in range(x_min, x_max): # ONLY scan within the book's width
+            # If there's a body in this column, recover the top
+            if np.any(mask[top_zone:top_zone+150, col]): 
+                mask[:top_zone, col] |= not_pure_white[:top_zone, col]
 
-        # 5. FINAL REPAIR
-        final_mask = ndimage.binary_fill_holes(final_mask)
-        # One last smooth to clean up edges
-        final_mask = ndimage.binary_closing(final_mask, structure=np.ones((3,3)))
+        # 4. STRUCTURAL CLEANUP
+        # Fill holes in text/leaves and bridge small gaps
+        mask = ndimage.binary_dilation(mask, iterations=2)
+        mask = ndimage.binary_fill_holes(mask)
+        mask = ndimage.binary_erosion(mask, iterations=2)
+
+        # 5. KILL WINGS (Final X-Axis Crop)
+        # Any pixel outside the x_min/x_max is forced to transparent
+        final_mask = np.zeros_like(mask)
+        final_mask[:, x_min:x_max] = mask[:, x_min:x_max]
 
         # 6. EXPORT
         data[:, :, 3] = (final_mask * 255).astype(np.uint8)
