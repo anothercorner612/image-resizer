@@ -14,20 +14,21 @@ def remove_background(input_path, output_path):
         alpha = data[:, :, 3]
         r, g, b = data[:,:,0], data[:,:,1], data[:,:,2]
 
-        # 1. BRIGHTNESS CALCULATION
-        # This helps us distinguish between a "flat" black shadow and a "detailed" black cover
+        # 1. BRIGHTNESS PROTECTOR (Keep dark covers solid)
         brightness = (0.299 * r + 0.587 * g + 0.114 * b)
 
         # 2. THE CORE MASK
-        # We start with the AI mask but PROTECT anything that is quite dark (likely the book)
-        # and REJECT anything that is medium-gray (likely the shadow)
+        # Protect dark pixels (cover) but keep AI's general shape
         mask = (alpha > 140) | ((brightness < 60) & (alpha > 50))
 
-        # 3. GEOMETRIC LOCK (Horizontal)
+        # 3. GEOMETRIC LOCK (Find the book's width)
         coords = np.argwhere(mask)
         if coords.size > 0:
-            y_min, x_min = coords.min(axis=0)
-            y_max, x_max = coords.max(axis=0)
+            x_min = coords[:, 1].min()
+            x_max = coords[:, 1].max()
+            # Add a small buffer so we don't clip the very edge pixels
+            x_min = max(0, x_min - 5)
+            x_max = min(data.shape[1], x_max + 5)
         else:
             x_min, x_max = 0, data.shape[1]
 
@@ -37,20 +38,18 @@ def remove_background(input_path, output_path):
         not_bg_white = (r < 250) & (g < 250) & (b < 250)
         
         for col in range(x_min, x_max):
-            # Only recover top if there is body below
             if np.any(mask[top_zone:top_zone+150, col]): 
                 mask[:top_zone, col] |= not_bg_white[:top_zone, col]
 
-        # 5. THE SHADOW KILLER (Bottom-Up Erosion)
-        # Most "black bars" are at the very bottom. We erode just the bottom edge.
+        # 5. SHADOW EROSION (Clean the bottom bar)
         bottom_edge = int(height * 0.85)
         mask[bottom_edge:, :] = ndimage.binary_erosion(mask[bottom_edge:, :], iterations=2)
 
-        # 6. STRUCTURAL INTEGRITY
+        # 6. STRUCTURAL CLEANUP
         mask = ndimage.binary_fill_holes(mask)
         mask = ndimage.binary_closing(mask, structure=np.ones((3,3)))
 
-        # 7. FINAL CLIP
+        # 7. FINAL CLIP (Remove anything outside the book width)
         final_mask = np.zeros_like(mask)
         final_mask[:, x_min:x_max] = mask[:, x_min:x_max]
 
@@ -60,5 +59,11 @@ def remove_background(input_path, output_path):
         return 0
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        # CRITICAL: If Python fails, save the raw AI image so Sharp doesn't crash
+        print(f"Python Error: {e}", file=sys.stderr)
+        if 'result_image' in locals():
+            result_image.save(output_path)
+        return 0 # Return 0 so the JS runner continues
+
+if __name__ == "__main__":
+    if len(sys.argv)
