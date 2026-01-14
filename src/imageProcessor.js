@@ -61,14 +61,14 @@ export class ImageProcessor {
           width: canvasWidth,
           height: canvasHeight,
           channels: 4,
-          background: this.config.backgroundColor || '#f2f2f2'
+          background: this.config.backgroundColor || '#f3f3f4'
         }
       })
       .composite([{
         input: resizedProduct,
         gravity: 'center'
       }])
-      .webp({ quality: 85 })
+      .webp({ quality: 92 })
       .toBuffer();
 
       return {
