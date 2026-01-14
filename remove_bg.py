@@ -7,41 +7,41 @@ import withoutbg
 
 def remove_background(input_path, output_path):
     try:
-        # 1. LOAD & PREP
+        # 1. LOAD IMAGE
         pil_img = Image.open(input_path).convert("RGBA")
         data = np.array(pil_img)
-        h, w = data.shape[:2]
+        gray = cv2.cvtColor(data, cv2.COLOR_RGBA2GRAY)
 
-        # 2. THE AI BRAIN (withoutbg)
-        # Identifies the product based on learned patterns
+        # 2. AI PASS (The Brain)
         model = withoutbg.WithoutBG.opensource()
         ai_result = model.remove_background(input_path)
         ai_alpha = np.array(ai_result.convert("RGBA"))[:, :, 3]
 
-        # 3. THE TEXTURE BRAIN (Saliency)
-        # Identifies the product based on contrast and texture (great for white covers)
-        saliency = cv2.saliency.StaticSaliencyFineGrained_create()
-        success, saliency_map = saliency.computeSaliency(data[:,:,:3])
-        saliency_map = (saliency_map * 255).astype("uint8")
-        _, thresh = cv2.threshold(saliency_map, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        # 3. CANNY PASS (The Edges)
+        # Finds high-contrast edges (like text and card boundaries)
+        edges = cv2.Canny(gray, 30, 100)
+        
+        # Dilate the edges to connect them into a solid block
+        kernel = np.ones((15, 15), np.uint8)
+        dilated_edges = cv2.dilate(edges, kernel, iterations=1)
+        
+        # Fill the holes inside the edges to create a solid "object" mask
+        filled_edges = ndimage.binary_fill_holes(dilated_edges > 0)
 
-        # 4. THE MERGE
-        # Combines both sources of truth
-        combined_mask = cv2.bitwise_or(ai_alpha, thresh)
+        # 4. SMART MERGE
+        # Keep pixels if AI says 'it's a book' OR Canny found 'edges of a book'
+        combined_mask = cv2.bitwise_or(ai_alpha, (filled_edges * 255).astype(np.uint8))
 
-        # 5. HOLE FILLING
-        # Fixes the 'fuzzy' or transparent spots in the middle of white books
+        # 5. HOLE FILLING & ISLAND CLEANUP
+        # Ensures the center of the white cover is 100% solid
         final_mask = ndimage.binary_fill_holes(combined_mask > 0)
         
-        # 6. ISLAND KILLER
-        # Removes small background noise or floating artifacts
         label_im, nb_labels = ndimage.label(final_mask)
         if nb_labels > 1:
             sizes = ndimage.sum(final_mask, label_im, range(nb_labels + 1))
             final_mask = (label_im == np.argmax(sizes))
 
-        # 7. EXPORT WITH 5px SAFETY GUTTER
-        # Sharp-edged transparency for the JavaScript scaling logic
+        # 6. EXPORT WITH 5px GUTTER
         alpha_final = (final_mask * 255).astype(np.uint8)
         alpha_final[:5, :] = 0
         alpha_final[-5:, :] = 0
