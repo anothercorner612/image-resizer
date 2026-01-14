@@ -12,38 +12,39 @@ def remove_background(input_path, output_path):
         data = np.array(img_rgba)
         
         alpha = data[:, :, 3]
+        # Use float for precision math
         r, g, b = data[:,:,0].astype(float), data[:,:,1].astype(float), data[:,:,2].astype(float)
 
-        # 1. SCANNER-WHITE REJECTION
-        # Anything very close to pure white is forced to transparent
-        is_not_white = (r < 252) | (g < 252) | (b < 252)
+        # 1. SCANNER-WHITE REJECTION (Strict)
+        is_not_white = (r < 251) | (g < 251) | (b < 251)
         
-        # 2. CREATE SOLID MASK
-        # We combine AI mask with our color-check and fill holes (fixes envelopes)
-        mask = (alpha > 100) | is_not_white
+        # 2. THE SOLIDIFIER (Fixes blur/fuzziness on white covers)
+        # If it's not scanner-white AND the AI thinks it's likely foreground,
+        # we force it to be 100% solid (255). This removes the 'haze'.
+        mask = (alpha > 80) | is_not_white
         mask = ndimage.binary_fill_holes(mask)
 
-        # 3. THE "ISLAND KILLER" (Crucial for Scaling)
-        # Finds the book and deletes any stray shadows or black bars at the edges
+        # 3. THE "ISLAND KILLER"
         label_im, nb_labels = ndimage.label(mask)
         if nb_labels > 1:
             sizes = ndimage.sum(mask, label_im, range(nb_labels + 1))
             mask = (label_im == np.argmax(sizes))
 
-        # 4. SMOOTH THE EDGES
-        mask = ndimage.binary_closing(mask, structure=np.ones((3,3)))
+        # 4. EDGE SHARPENING
+        # Instead of 'Closing' (which blurs), we use a tiny bit of 'Erosion' 
+        # followed by 'Dilation' to snap the edges to the text.
+        mask = ndimage.binary_opening(mask, structure=np.ones((2,2)))
 
-        # 5. THE "GUTTER" (The .8 Scaling Handshake)
-        # We force a 15px border of 100% transparency. 
-        # This ensures Sharp's .trim() always has a clean edge to start from.
-        h, w = mask.shape
+        # 5. CONVERT TO HARD ALPHA (No semi-transparency)
         final_alpha = (mask * 255).astype(np.uint8)
+
+        # 6. THE GUTTER (For scaling)
         final_alpha[:15, :] = 0
         final_alpha[-15:, :] = 0
         final_alpha[:, :15] = 0
         final_alpha[:, -15:] = 0
 
-        # 6. EXPORT
+        # 7. EXPORT
         data[:, :, 3] = final_alpha
         Image.fromarray(data).save(output_path)
         return 0
