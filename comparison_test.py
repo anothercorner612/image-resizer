@@ -5,9 +5,10 @@ from PIL import Image
 from pathlib import Path
 
 OUTPUT_ROOT = "test_results"
+HTML_FILE = "comparison_report.html"
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
-def process_logic(input_path, save_folder):
+def process_logic(input_path, image_stem):
     pil_img = Image.open(input_path).convert("RGBA")
     original_np = np.array(pil_img)
     rgb = original_np[:, :, :3]
@@ -15,79 +16,106 @@ def process_logic(input_path, save_folder):
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
     height, width = gray.shape
+    
+    image_results = []
 
     def save_v(name, alpha_channel):
         res = original_np.copy()
         res[:, :, 3] = alpha_channel
-        Image.fromarray(res).save(os.path.join(save_folder, f"{name}.png"))
+        rel_path = f"{image_stem}_{name}.png"
+        Image.fromarray(res).save(os.path.join(OUTPUT_ROOT, rel_path))
+        image_results.append((name, rel_path))
 
-    # --- 1-5: REFINED THRESHOLDS ---
-    for val in [230, 238, 242, 246, 250]:
-        _, t = cv2.threshold(gray, val, 255, cv2.THRESH_BINARY_INV)
-        save_v(f"01_thresh_{val}", t)
+    # --- 1. THE "COLOR SENSOR" HYBRIDS (Great for the Ladder) ---
+    # Looks for any color that ISN'T the background corner color
+    bg_color_hsv = hsv[5, 5].astype(int)
+    lower_bg = np.array([max(0, bg_color_hsv[0]-10), 20, 20])
+    upper_bg = np.array([min(180, bg_color_hsv[0]+10), 255, 255])
+    bg_mask = cv2.inRange(hsv, lower_bg, upper_bg)
+    save_v("hsv_bg_dist", cv2.bitwise_not(bg_mask))
 
-    # --- 6-9: CHROMA/COLOR FILTERS ---
+    # --- 2. THE "LADDER SHIELD" (Lab Color space) ---
+    # Separates based on A/B channels (Pink/Green and Blue/Yellow)
     l, a, b_chan = cv2.split(lab)
-    _, a_t = cv2.threshold(cv2.absdiff(a, 128), 8, 255, cv2.THRESH_BINARY)
-    _, b_t = cv2.threshold(cv2.absdiff(b_chan, 128), 8, 255, cv2.THRESH_BINARY)
-    chroma_mask = cv2.bitwise_or(a_t, b_t)
-    save_v("02_chroma_presence_mask", chroma_mask)
+    a_dist = cv2.absdiff(a, 128)
+    b_dist = cv2.absdiff(b_chan, 128)
+    chroma = cv2.addWeighted(a_dist, 0.5, b_dist, 0.5, 0)
+    _, chroma_t = cv2.threshold(chroma, 10, 255, cv2.THRESH_BINARY)
+    save_v("lab_chroma_shield", chroma_t)
 
-    # --- 10-13: EDGE-BLOCK FLOODFILL ---
-    edges = cv2.Canny(gray, 30, 100)
-    dilated_edges = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
-    for d in [5, 12]:
+    # --- 3. RECURSIVE EDGE-BLOCK (Stronger version of your favorite) ---
+    edges = cv2.Canny(gray, 20, 80)
+    wall = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=2)
+    for d in [6, 15]:
         f_m = np.zeros((height + 2, width + 2), np.uint8)
         temp_rgb = rgb.copy()
-        temp_rgb[dilated_edges == 255] = [0, 0, 0] 
+        temp_rgb[wall == 255] = [0, 0, 0] # Burn edges to stop leaks
         cv2.floodFill(temp_rgb, f_m, (0,0), (255,255,255), (d,)*3, (d,)*3, 8)
-        save_v(f"03_edge_blocked_flood_{d}", np.where(f_m[1:-1, 1:-1] == 1, 0, 255).astype(np.uint8))
+        save_v(f"wall_flood_tol_{d}", np.where(f_m[1:-1, 1:-1] == 1, 0, 255).astype(np.uint8))
 
-    # --- 14-16: SAT-GRAY HYBRID ---
-    sat_mask = cv2.threshold(hsv[:,:,1], 6, 255, cv2.THRESH_BINARY)[1]
-    for g_v in [235, 245]:
-        gray_mask = cv2.threshold(gray, g_v, 255, cv2.THRESH_BINARY_INV)[1]
-        save_v(f"04_hybrid_sat_gray_{g_v}", cv2.bitwise_or(gray_mask, sat_mask))
+    # --- 4. THE "VAN PROTECTOR" (Sat + Dark Hybrid) ---
+    # Protects pixels that are either Dark (ink) or Colorful (van body)
+    sat_mask = cv2.threshold(hsv[:,:,1], 10, 255, cv2.THRESH_BINARY)[1]
+    dark_mask = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)[1]
+    shield = cv2.bitwise_or(sat_mask, dark_mask)
+    for g_v in [240, 245]:
+        g_mask = cv2.threshold(gray, g_v, 255, cv2.THRESH_BINARY_INV)[1]
+        save_v(f"ink_sat_hybrid_{g_v}", cv2.bitwise_or(g_mask, shield))
 
-    # --- 17-18: MORPHOLOGY ---
-    kernel = np.ones((5,5), np.uint8)
-    _, base_t = cv2.threshold(gray, 242, 255, cv2.THRESH_BINARY_INV)
-    save_v("05_morph_closed", cv2.morphologyEx(base_t, cv2.MORPH_CLOSE, kernel))
+    # --- 5. CENTER-WEIGHTED GRABCUT (Computer Vision approach) ---
+    mask = np.zeros(rgb.shape[:2], np.uint8)
+    bgd = np.zeros((1, 65), np.float64); fgd = np.zeros((1, 65), np.float64)
+    rect = (10, 10, width-20, height-20)
+    try:
+        cv2.grabCut(rgb, mask, rect, bgd, fgd, 3, cv2.GC_INIT_WITH_RECT)
+        gc_mask = np.where((mask==2)|(mask==0), 0, 255).astype('uint8')
+        save_v("grabcut_center", gc_mask)
+    except: pass
 
-    # --- 19-21: COLOR DISTANCE ---
-    bg_color = rgb[5, 5].astype(float)
-    diff = np.sqrt(np.sum((rgb.astype(float) - bg_color)**2, axis=2))
-    for tol in [20, 40]:
-        save_v(f"06_color_dist_tol_{tol}", np.where(diff > tol, 255, 0).astype(np.uint8))
+    # --- 6. MULTI-CHANNEL MAX ---
+    # Takes the strongest signal from R, G, and B thresholds
+    r, g, b_c = cv2.split(rgb)
+    _, rt = cv2.threshold(r, 245, 255, cv2.THRESH_BINARY_INV)
+    _, gt = cv2.threshold(g, 245, 255, cv2.THRESH_BINARY_INV)
+    _, bt = cv2.threshold(b_c, 245, 255, cv2.THRESH_BINARY_INV)
+    save_v("max_channel_threshold", cv2.bitwise_or(rt, cv2.bitwise_or(gt, bt)))
 
-    # --- 22-23: SOBEL EDGE HYBRID (New Replace for Saliency) ---
-    # Good for finding the 'texture' of the ladder rungs
-    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    sobel_combined = cv2.magnitude(sobelx, sobely)
-    sobel_norm = cv2.normalize(sobel_combined, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    _, sobel_t = cv2.threshold(sobel_norm, 20, 255, cv2.THRESH_BINARY)
-    save_v("07_sobel_texture_mask", sobel_t)
-
-    # --- 24-25: THE "SHADOW PROTECTOR" ---
-    # Targets darker 'ink' lines to prevent them from becoming transparent
-    _, shadow_mask = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
-    final_shadow = cv2.bitwise_or(base_t, shadow_mask)
-    save_v("08_shadow_ink_protection", final_shadow)
+    return image_results
 
 def run_comparison(target_path):
+    html_content = """<html><head><style>
+        body { font-family: sans-serif; background: #1a1a1a; color: #eee; padding: 20px; }
+        .row { display: flex; overflow-x: auto; margin-bottom: 40px; padding: 20px; background: #252525; border-radius: 8px; }
+        .img-card { flex: 0 0 280px; margin-right: 20px; text-align: center; background: #333; padding: 10px; border-radius: 4px; }
+        .img-card img { width: 100%; height: auto; border: 1px solid #444; margin-top: 10px;
+            background-image: linear-gradient(45deg, #333 25%, transparent 25%), linear-gradient(-45deg, #333 25%, transparent 25%),
+            linear-gradient(45deg, transparent 75%, #333 75%), linear-gradient(-45deg, transparent 75%, #333 75%);
+            background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px; }
+        h2 { color: #ff9f43; margin-top: 30px; }
+    </style></head><body><h1>Logic Stress-Test Gallery</h1>"""
+
     if os.path.isdir(target_path):
         images = [f for f in os.listdir(target_path) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-        for img in images:
-            save_subfolder = os.path.join(OUTPUT_ROOT, Path(img).stem)
-            os.makedirs(save_subfolder, exist_ok=True)
-            process_logic(os.path.join(target_path, img), save_subfolder)
     else:
-        save_subfolder = os.path.join(OUTPUT_ROOT, Path(target_path).stem)
-        os.makedirs(save_subfolder, exist_ok=True)
-        process_logic(target_path, save_subfolder)
-    print(f"\n🏁 Finished! Results in '{OUTPUT_ROOT}'")
+        images = [os.path.basename(target_path)]
+        target_path = os.path.dirname(target_path)
+
+    for img_name in images:
+        full_path = os.path.join(target_path, img_name)
+        stem = Path(img_name).stem
+        orig_rel = f"{stem}_ORIGINAL.png"
+        Image.open(full_path).save(os.path.join(OUTPUT_ROOT, orig_rel))
+        
+        results = process_logic(full_path, stem)
+        html_content += f"<h2>Image: {img_name}</h2><div class='row'>"
+        html_content += f"<div class='img-card'><b>ORIGINAL</b><br><img src='{OUTPUT_ROOT}/{orig_rel}'></div>"
+        for label, path in results:
+            html_content += f"<div class='img-card'><b>{label}</b><br><img src='{OUTPUT_ROOT}/{path}'></div>"
+        html_content += "</div>"
+
+    html_content += "</body></html>"
+    with open(HTML_FILE, "w") as f: f.write(html_content)
+    print(f"\n🏁 Finished! Open '{HTML_FILE}' in your browser.")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1: run_comparison(sys.argv[1])
-    else: print("Usage: python comparison_test.py [path]")
