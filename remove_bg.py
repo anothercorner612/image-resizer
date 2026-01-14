@@ -1,101 +1,58 @@
 import sys, os
 import numpy as np
 import cv2
-from PIL import Image, ImageEnhance
+from PIL import Image
 from scipy import ndimage
 import withoutbg
 
-def apply_pro_contrast(img_cv):
-    """
-    Creates a 'Stunt Double' image with aggressive contrast to help the AI 
-    find edges on white-on-white products.
-    """
-    # 1. Convert to LAB color space to separate Lightness from Color
-    lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-
-    # 2. Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to Lightness
-    # This makes subtle texture differences (paper grain) pop out.
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    cl = clahe.apply(l)
-
-    # 3. Merge back and convert to RGB
-    limg = cv2.merge((cl, a, b))
-    enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-
-    # 4. Gamma Correction (Darken mid-tones to separate off-white from pure white)
-    # Gamma < 1.0 makes shadows/mid-tones darker
-    gamma = 0.8
-    invGamma = 1.0 / gamma
-    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-    enhanced = cv2.LUT(enhanced, table)
-
-    return enhanced
-
 def remove_background(input_path, output_path):
-    temp_boosted_path = "temp_boosted_for_ai.jpg"
-    
     try:
-        # 1. LOAD ORIGINAL IMAGE
-        # We read it with OpenCV for the heavy math
-        original_cv = cv2.imread(input_path)
-        
-        # 2. CREATE THE "STUNT DOUBLE"
-        # This image is ugly/dark/grainy, but the EDGES are clear.
-        boosted_cv = apply_pro_contrast(original_cv)
-        cv2.imwrite(temp_boosted_path, boosted_cv)
+        # 1. LOAD IMAGE
+        pil_img = Image.open(input_path).convert("RGBA")
+        original_data = np.array(pil_img)
 
-        # 3. RUN AI ON THE STUNT DOUBLE
-        # The AI now sees a "Grey Book on White BG" -> Easy detection!
+        # 2. GET AI MASK
         model = withoutbg.WithoutBG.opensource()
-        ai_result = model.remove_background(temp_boosted_path)
-        
-        # Extract the Alpha channel (The Cutout Shape)
-        ai_alpha = np.array(ai_result.convert("RGBA"))[:, :, 3]
+        ai_result = model.remove_background(input_path)
+        alpha = np.array(ai_result.convert("RGBA"))[:, :, 3]
 
-        # 4. "SOLIDIFY" THE MASK
-        # Since we boosted contrast, we trust the shape more.
-        # We simply remove the "fuzz" (anything < 10% opacity becomes 0, else 255)
-        # This fixes the "Blurry Text" issue.
-        _, solid_mask = cv2.threshold(ai_alpha, 10, 255, cv2.THRESH_BINARY)
+        # 3. CLEAN UP ARTIFACTS (The Halo Fix)
+        # Morphological opening removes 'noise' around the edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        alpha = cv2.morphologyEx(alpha, cv2.MORPH_OPEN, kernel, iterations=1)
 
-        # 5. HOLE FILLING (The "Swiss Cheese" Fix)
-        # Protects the center of the book from being transparent
-        filled_mask = ndimage.binary_fill_holes(solid_mask > 0)
+        # 4. INTELLIGENT HOLE FILLING (The Ladder Fix)
+        # We only fill holes that are tiny (noise), not large (geometry)
+        contours, hierarchy = cv2.findContours(alpha, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         
-        # 6. ISLAND KILLER
-        # Removes floating dust spots
-        label_im, nb_labels = ndimage.label(filled_mask)
-        if nb_labels > 1:
-            sizes = ndimage.sum(filled_mask, label_im, range(nb_labels + 1))
-            filled_mask = (label_im == np.argmax(sizes))
+        if hierarchy is not None:
+            for i, h in enumerate(hierarchy[0]):
+                # If it's an internal hole (has a parent contour)
+                if h[3] != -1:
+                    area = cv2.contourArea(contours[i])
+                    # Only fill if hole is less than 0.5% of the total image area
+                    if area < (alpha.shape[0] * alpha.shape[1] * 0.005):
+                        cv2.drawContours(alpha, [contours[i]], -1, 255, -1)
 
-        # 7. APPLY MASK TO ORIGINAL
-        # We create the final output using the ORIGINAL pixels + the BOOSTED mask
-        pil_original = Image.open(input_path).convert("RGBA")
-        data = np.array(pil_original)
-        
-        # Apply the 5px safety gutter for JS scaling
-        alpha_final = (filled_mask * 255).astype(np.uint8)
-        alpha_final[:5, :] = 0
-        alpha_final[-5:, :] = 0
-        alpha_final[:, :5] = 0
-        alpha_final[:, -5:] = 0
+        # 5. SOFTEN EDGES (The Staircase Fix)
+        # Subtle blur makes the transition look natural
+        alpha = cv2.GaussianBlur(alpha, (3, 3), 0)
 
-        data[:, :, 3] = alpha_final
-        Image.fromarray(data).save(output_path)
+        # 6. APPLY CLEAN ALPHA
+        original_data[:, :, 3] = alpha
         
-        # Cleanup
-        if os.path.exists(temp_boosted_path):
-            os.remove(temp_boosted_path)
-            
+        # 7. ADD 5px SAFETY GUTTER (For Node.js scaling)
+        original_data[:5, :, 3] = 0
+        original_data[-5:, :, 3] = 0
+        original_data[:, :5, 3] = 0
+        original_data[:, -5:, 3] = 0
+
+        Image.fromarray(original_data).save(output_path)
         return 0
 
     except Exception as e:
         print(f"Python Error: {e}", file=sys.stderr)
-        if os.path.exists(temp_boosted_path):
-            os.remove(temp_boosted_path)
-        return 0
+        return 1
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
