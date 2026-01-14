@@ -6,6 +6,7 @@ import withoutbg
 
 def remove_background(input_path, output_path):
     try:
+        # 1. AI SEGMENTATION
         model = withoutbg.WithoutBG.opensource()
         result_image = model.remove_background(input_path)
         img_rgba = result_image.convert("RGBA")
@@ -15,45 +16,48 @@ def remove_background(input_path, output_path):
         rgb = data[:, :, 0:3]
         r, g, b = rgb[:,:,0], rgb[:,:,1], rgb[:,:,2]
 
-        # 1. CORE MASK: High threshold to block "faint" background artifacts
-        core_mask = (alpha > 120)
+        # 2. THE CORE MASK
+        # We use a high threshold (125) to stop shadows from turning into solid blocks
+        mask = (alpha > 125)
 
-        # 2. TARGETED TOP RECOVERY (Fixes the beheaded white books)
-        # We only look at the top 20% of the image
+        # 3. VERTICAL RECOVERY (The "White Book" Fix)
+        # We only look at the top 20% for missing white edges
         height, width = data.shape[:2]
         top_zone = int(height * 0.2)
-        # Accept pixels that aren't pure white background (luminance check)
         not_pure_white = (r < 252) & (g < 252) & (b < 252)
         
-        top_recovery = np.zeros_like(core_mask)
-        # Vertical Anchor: Only recover top pixels if there is a "body" below them
+        top_recovery = np.zeros_like(mask)
+        # VERTICAL ANCHOR: Only recover if there is a 'body' in that same column
         for col in range(width):
-            if np.any(core_mask[top_zone:top_zone+100, col]): 
+            if np.any(mask[top_zone:top_zone+120, col]): 
                 top_recovery[:top_zone, col] = not_pure_white[:top_zone, col]
 
-        # 3. CONSOLIDATION
-        combined = core_mask | top_recovery
-        
-        # 4. ISLAND REMOVAL (Fixes the "Black Wings" and floating artifacts)
-        # This identifies distinct blobs. We only keep the biggest one (the product).
+        # 4. COMPONENT ANALYSIS (The "Wing" & Artifact Killer)
+        # This finds separate 'blobs'. It deletes everything except the biggest one.
+        combined = mask | top_recovery
         label_im, nb_labels = ndimage.label(combined)
+        
         if nb_labels > 1:
             sizes = ndimage.sum(combined, label_im, range(nb_labels + 1))
-            mask_size = sizes < (sizes.max() * 0.5) # Reject blobs smaller than 50% of main product
-            remove_pixel = mask_size[label_im]
-            combined[remove_pixel] = 0
+            # Keep only the largest object (index of the max size)
+            largest_label = np.argmax(sizes)
+            final_mask = (label_im == largest_label)
+        else:
+            final_mask = combined
 
         # 5. STRUCTURAL INTEGRITY
-        # Closes small gaps in text (Cycling Lexicon) and fills internal holes
-        final_mask = ndimage.binary_fill_holes(combined)
-        
-        # 6. FINAL RECONSTRUCT
+        # Fill internal holes (text/details) and smooth the edge slightly
+        final_mask = ndimage.binary_fill_holes(final_mask)
+        # Closing joins any tiny cracks in the mask
+        final_mask = ndimage.binary_closing(final_mask, structure=np.ones((3,3)))
+
+        # 6. SAVE OUTPUT
         data[:, :, 3] = (final_mask * 255).astype(np.uint8)
         Image.fromarray(data).save(output_path)
         return 0
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"Error in Python: {e}", file=sys.stderr)
         return 1
 
 if __name__ == "__main__":
