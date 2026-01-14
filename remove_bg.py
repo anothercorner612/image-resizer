@@ -14,41 +14,43 @@ def remove_background(input_path, output_path):
         alpha = data[:, :, 3]
         r, g, b = data[:,:,0], data[:,:,1], data[:,:,2]
 
-        # 1. BRIGHTNESS PROTECTOR (Keep dark/detailed covers)
+        # --- ADJUSTMENT 1: BRIGHTNESS PROTECTION ---
+        # Increased to 85 to protect light-colored cards/envelopes
         brightness = (0.299 * r + 0.587 * g + 0.114 * b)
+        
+        # --- ADJUSTMENT 2: CORE MASK THRESHOLD ---
+        # Dropped Alpha to 70 to keep soft white edges
+        mask = (alpha > 70) | ((brightness < 85) & (alpha > 30))
 
-        # 2. THE CORE MASK
-        # Dropped to 90 to be even safer with white envelopes/cards
-        mask = (alpha > 90) | ((brightness < 70) & (alpha > 40))
-
-        # 3. GEOMETRIC LOCK (Find the product width)
+        # 3. GEOMETRIC LOCK
         coords = np.argwhere(mask)
         if coords.size > 0:
             x_min, x_max = coords[:, 1].min(), coords[:, 1].max()
-            x_min = max(0, x_min - 10)
-            x_max = min(data.shape[1], x_max + 10)
+            x_min = max(0, x_min - 15)
+            x_max = min(data.shape[1], x_max + 15)
         else:
             x_min, x_max = 0, data.shape[1]
 
         # 4. ENVELOPE / WHITE EDGE RECOVERY
         height, width = data.shape[:2]
-        top_zone = int(height * 0.35) # Expanded for taller items
-        not_bg_white = (r < 251) & (g < 251) & (b < 251)
+        top_zone = int(height * 0.40) # Look even further down for recovery
+        
+        # --- ADJUSTMENT 3: RECOVERY SENSITIVITY ---
+        # Changed to 253 - captures everything except the most "pure" white
+        not_bg_white = (r < 253) & (g < 253) & (b < 253)
         
         for col in range(x_min, x_max):
-            if np.any(mask[top_zone:top_zone+200, col]): 
+            if np.any(mask[top_zone:top_zone+250, col]): 
                 mask[:top_zone, col] |= not_bg_white[:top_zone, col]
 
         # 5. STRUCTURAL CLEANUP
         mask = ndimage.binary_fill_holes(mask)
-        # Use a smaller structure to keep envelope corners sharp
+        # Smaller structure preserves sharp corners of the envelope
         mask = ndimage.binary_closing(mask, structure=np.ones((2,2)))
 
-        # 6. THE "CANVAS CLEANER" (Crucial for the .8 scaling)
-        # We force a 5px transparent border around the ENTIRE image
-        # This ensures the JS 'sharp' library detects the product correctly
+        # 6. CANVAS CLEANER (Ensures the .8 scaling works)
         final_mask = np.zeros_like(mask)
-        final_mask[5:-5, x_min+5:x_max-5] = mask[5:-5, x_min+5:x_max-5]
+        final_mask[5:-5, x_min+2:x_max-2] = mask[5:-5, x_min+2:x_max-2]
 
         # 7. EXPORT
         data[:, :, 3] = (final_mask * 255).astype(np.uint8)
