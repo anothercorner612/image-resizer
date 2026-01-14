@@ -2,52 +2,58 @@ import sys, os
 import numpy as np
 from PIL import Image
 from scipy import ndimage
+import cv2 
 import withoutbg
 
 def remove_background(input_path, output_path):
     try:
+        # 1. LOAD & PREP
+        pil_img = Image.open(input_path).convert("RGBA")
+        data = np.array(pil_img)
+        h, w = data.shape[:2]
+
+        # 2. THE AI BRAIN (withoutbg)
+        # Identifies the product based on learned patterns
         model = withoutbg.WithoutBG.opensource()
-        # Trust the AI for the initial cut - it's usually best at text
-        result_image = model.remove_background(input_path)
-        img_rgba = result_image.convert("RGBA")
-        data = np.array(img_rgba)
+        ai_result = model.remove_background(input_path)
+        ai_alpha = np.array(ai_result.convert("RGBA"))[:, :, 3]
+
+        # 3. THE TEXTURE BRAIN (Saliency)
+        # Identifies the product based on contrast and texture (great for white covers)
+        saliency = cv2.saliency.StaticSaliencyFineGrained_create()
+        success, saliency_map = saliency.computeSaliency(data[:,:,:3])
+        saliency_map = (saliency_map * 255).astype("uint8")
+        _, thresh = cv2.threshold(saliency_map, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+        # 4. THE MERGE
+        # Combines both sources of truth
+        combined_mask = cv2.bitwise_or(ai_alpha, thresh)
+
+        # 5. HOLE FILLING
+        # Fixes the 'fuzzy' or transparent spots in the middle of white books
+        final_mask = ndimage.binary_fill_holes(combined_mask > 0)
         
-        alpha = data[:, :, 3]
+        # 6. ISLAND KILLER
+        # Removes small background noise or floating artifacts
+        label_im, nb_labels = ndimage.label(final_mask)
+        if nb_labels > 1:
+            sizes = ndimage.sum(final_mask, label_im, range(nb_labels + 1))
+            final_mask = (label_im == np.argmax(sizes))
 
-        # 1. KILL THE BLACK BARS (Top 8% and Bottom 8%)
-        # This is a 'dumb' geometric cut. It simply forces the top/bottom 
-        # edges to be transparent, which usually catches the scanner lid bars.
-        height, width = data.shape[:2]
-        margin = int(height * 0.08)
-        
-        # We only wipe the margin if the AI left something 'noisy' there
-        cleaned_alpha = alpha.copy()
-        cleaned_alpha[:margin, :] = 0
-        cleaned_alpha[-margin:, :] = 0
+        # 7. EXPORT WITH 5px SAFETY GUTTER
+        # Sharp-edged transparency for the JavaScript scaling logic
+        alpha_final = (final_mask * 255).astype(np.uint8)
+        alpha_final[:5, :] = 0
+        alpha_final[-5:, :] = 0
+        alpha_final[:, :5] = 0
+        alpha_final[:, -5:] = 0
 
-        # 2. THE "GUTTER" (For the .8 Scaling Handshake)
-        # We force a 15px border on the sides to ensure the JS 'trim' works
-        cleaned_alpha[:, :15] = 0
-        cleaned_alpha[:, -15:] = 0
-
-        # 3. HOLE FILLING (Internal Only)
-        # This fixes the 'Swiss Cheese' effect inside the book 
-        # without touching the outer edges.
-        final_mask = ndimage.binary_fill_holes(cleaned_alpha > 0)
-        
-        # Apply the filled mask back to the alpha channel
-        # This ensures the interior is 255 (solid) and the edges are smooth
-        alpha_final = np.where(final_mask, 255, 0).astype(np.uint8)
-
-        # 4. EXPORT
         data[:, :, 3] = alpha_final
         Image.fromarray(data).save(output_path)
         return 0
 
     except Exception as e:
         print(f"Python Error: {e}", file=sys.stderr)
-        if 'result_image' in locals():
-            result_image.save(output_path)
         return 0
 
 if __name__ == "__main__":
