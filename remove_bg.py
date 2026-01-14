@@ -6,7 +6,6 @@ import withoutbg
 
 def remove_background(input_path, output_path):
     try:
-        # 1. AI SEGMENTATION
         model = withoutbg.WithoutBG.opensource()
         result_image = model.remove_background(input_path)
         img_rgba = result_image.convert("RGBA")
@@ -16,39 +15,39 @@ def remove_background(input_path, output_path):
         rgb = data[:, :, 0:3]
         r, g, b = rgb[:,:,0], rgb[:,:,1], rgb[:,:,2]
 
-        # 2. THE CORE MASK
-        # 125 is the "Sweet Spot" to keep black books solid but kill gray shadows
+        # 1. THE CORE MASK (High threshold to avoid shadow-blocks)
         mask = (alpha > 125)
 
-        # 3. VERTICAL RECOVERY (Fixes the White-on-White "Beheading")
-        # Scans the top 20% specifically for pixels that aren't pure background
+        # 2. THE "GLUE" STEP (Prevents accidental cropping)
+        # We temporarily expand the mask to join parts of the book that 
+        # might be separated by a thin line of white or text.
+        glued_mask = ndimage.binary_dilation(mask, iterations=5)
+
+        # 3. COMPONENT ANALYSIS (Island Removal)
+        label_im, nb_labels = ndimage.label(glued_mask)
+        
+        if nb_labels > 1:
+            sizes = ndimage.sum(glued_mask, label_im, range(nb_labels + 1))
+            largest_label = np.argmax(sizes)
+            # We keep the area belonging to the largest island
+            keep_area = (label_im == largest_label)
+            # Apply that "keep area" back to our original sharp mask
+            final_mask = mask & keep_area
+        else:
+            final_mask = mask
+
+        # 4. RE-ADD THE TOP EDGES (The White-on-White Fix)
         height, width = data.shape[:2]
         top_zone = int(height * 0.2)
         not_pure_white = (r < 252) & (g < 252) & (b < 252)
         
-        top_recovery = np.zeros_like(mask)
-        # Only recover white edges if they sit directly above the known product body
         for col in range(width):
-            if np.any(mask[top_zone:top_zone+120, col]): 
-                top_recovery[:top_zone, col] = not_pure_white[:top_zone, col]
+            if np.any(final_mask[top_zone:top_zone+150, col]): 
+                final_mask[:top_zone, col] |= not_pure_white[:top_zone, col]
 
-        # 4. COMPONENT ANALYSIS (The "Wing" & Artifact Killer)
-        # This identifies isolated blobs. We delete everything except the biggest one.
-        combined = mask | top_recovery
-        label_im, nb_labels = ndimage.label(combined)
-        
-        if nb_labels > 1:
-            sizes = ndimage.sum(combined, label_im, range(nb_labels + 1))
-            # Keep only the largest object in the image (the product)
-            largest_label = np.argmax(sizes)
-            final_mask = (label_im == largest_label)
-        else:
-            final_mask = combined
-
-        # 5. STRUCTURAL REPAIR
-        # Fill holes (fix internal text/details) and smooth the edges
+        # 5. FINAL REPAIR
         final_mask = ndimage.binary_fill_holes(final_mask)
-        # Fuses tiny gaps and smooths the silhouette
+        # One last smooth to clean up edges
         final_mask = ndimage.binary_closing(final_mask, structure=np.ones((3,3)))
 
         # 6. EXPORT
