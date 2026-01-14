@@ -1,55 +1,60 @@
-import io
 import os
+import io
 from rembg import remove, new_session
 from PIL import Image
 
-# 1. Initialize the session ONCE. 
-# u2net is the 'Cookie Cutter' model best for books and retail goods.
-try:
-    session = new_session("u2net")
-except Exception as e:
-    print(f"Error loading AI model: {e}")
-    session = None
+# --- CONFIGURATION ---
+INPUT_FOLDER = "/Users/leefrank/Desktop/test"
+OUTPUT_FOLDER = "transparent_cutouts"
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-def process_retail_image(input_bytes):
-    """
-    The 'Engine': Takes raw bytes, returns clean WebP bytes.
-    Optimized for Books, Cards, and Coffee Bags.
-    """
-    if session is None:
-        return input_bytes
+# U2NET is the "Cookie Cutter" model. 
+# It is best for keeping book covers solid and finding rectangular edges.
+session = new_session("u2net")
 
-    try:
-        # AI Extraction: 
-        # alpha_matting=False keeps book edges sharp.
-        # post_process_mask=True prevents 'gutting' the artwork.
-        output_data = remove(
-            input_bytes, 
-            session=session,
-            alpha_matting=False,
-            post_process_mask=True 
-        )
-        
-        # Load result and auto-trim empty space
-        img = Image.open(io.BytesIO(output_data)).convert("RGBA")
-        bbox = img.getbbox()
-        if bbox:
-            img = img.crop(bbox)
-            
-        # Convert to WebP for Shopify
-        out_io = io.BytesIO()
-        img.save(out_io, format="WEBP", lossless=True)
-        return out_io.getvalue()
+def process_cutouts():
+    valid_exts = ('.png', '.jpg', '.jpeg', '.webp', '.heic')
+    files = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(valid_exts)]
 
-    except Exception as e:
-        # If one image fails, return None so your tool can log it and move on
-        print(f"Skipping image due to error: {e}")
-        return None
+    print(f"🚀 Processing {len(files)} cutouts...")
 
-# --- EXAMPLE OF INTEGRATION WITH YOUR TOOL ---
-# for product in active_shopify_products:
-#     raw_img = download_image(product.url)
-#     processed_img = process_retail_image(raw_img)
-#     if processed_img:
-#         upload_to_shopify(processed_img)
-#         update_metafield(product.id, "processed", True)
+    for i, img_name in enumerate(files, 1):
+        input_path = os.path.join(INPUT_FOLDER, img_name)
+        # Keeps original filename, just changes extension to .webp
+        output_path = os.path.join(OUTPUT_FOLDER, f"{os.path.splitext(img_name)[0]}.webp")
+
+        print(f"[{i}/{len(files)}] Extracting: {img_name}...", end="\r")
+
+        try:
+            with open(input_path, 'rb') as inp:
+                input_data = inp.read()
+                
+                # SETTINGS FOR BOOKS/RETAIL:
+                # alpha_matting=False: Keeps the corners of the books perfectly sharp.
+                # post_process_mask=True: Fills in the "ladder" holes so the cover stays solid.
+                output_data = remove(
+                    input_data, 
+                    session=session,
+                    alpha_matting=False,
+                    post_process_mask=True
+                )
+                
+                # Load the result (which is already transparent)
+                img = Image.open(io.BytesIO(output_data)).convert("RGBA")
+
+                # --- AUTO-TRIM ---
+                # This crops the image to only the non-transparent pixels.
+                bbox = img.getbbox()
+                if bbox:
+                    img = img.crop(bbox)
+                
+                # Save as transparent WebP
+                img.save(output_path, "WEBP", lossless=True)
+
+        except Exception as e:
+            print(f"\n❌ Error on {img_name}: {e}")
+
+    print(f"\n\n🏁 Done! Transparent files are in '{OUTPUT_FOLDER}'")
+
+if __name__ == "__main__":
+    process_cutouts()
