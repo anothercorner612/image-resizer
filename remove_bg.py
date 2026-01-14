@@ -12,45 +12,49 @@ def remove_background(input_path, output_path):
         data = np.array(img_rgba)
         
         alpha = data[:, :, 3]
-        rgb = data[:, :, 0:3]
-        r, g, b = rgb[:,:,0], rgb[:,:,1], rgb[:,:,2]
+        r, g, b = data[:,:,0], data[:,:,1], data[:,:,2]
 
-        # 1. BASE MASK (Ignore light shadows)
-        mask = (alpha > 130) 
+        # 1. BRIGHTNESS CALCULATION
+        # This helps us distinguish between a "flat" black shadow and a "detailed" black cover
+        brightness = (0.299 * r + 0.587 * g + 0.114 * b)
 
-        # 2. FIND THE HORIZONTAL LIMITS (The "Geometric Lock")
-        # This finds the leftmost and rightmost pixel of the actual book body
+        # 2. THE CORE MASK
+        # We start with the AI mask but PROTECT anything that is quite dark (likely the book)
+        # and REJECT anything that is medium-gray (likely the shadow)
+        mask = (alpha > 140) | ((brightness < 60) & (alpha > 50))
+
+        # 3. GEOMETRIC LOCK (Horizontal)
         coords = np.argwhere(mask)
         if coords.size > 0:
-            x_min, x_max = coords[:, 1].min(), coords[:, 1].max()
-            # Add a tiny 5px buffer
-            x_min = max(0, x_min - 5)
-            x_max = min(data.shape[1], x_max + 5)
+            y_min, x_min = coords.min(axis=0)
+            y_max, x_max = coords.max(axis=0)
         else:
             x_min, x_max = 0, data.shape[1]
 
-        # 3. SELECTIVE TOP RECOVERY (Fixes White Blocks)
+        # 4. TOP RECOVERY (The White-on-White fix)
         height, width = data.shape[:2]
         top_zone = int(height * 0.20)
-        not_pure_white = (r < 250) & (g < 250) & (b < 250)
+        not_bg_white = (r < 250) & (g < 250) & (b < 250)
         
-        for col in range(x_min, x_max): # ONLY scan within the book's width
-            # If there's a body in this column, recover the top
+        for col in range(x_min, x_max):
+            # Only recover top if there is body below
             if np.any(mask[top_zone:top_zone+150, col]): 
-                mask[:top_zone, col] |= not_pure_white[:top_zone, col]
+                mask[:top_zone, col] |= not_bg_white[:top_zone, col]
 
-        # 4. STRUCTURAL CLEANUP
-        # Fill holes in text/leaves and bridge small gaps
-        mask = ndimage.binary_dilation(mask, iterations=2)
+        # 5. THE SHADOW KILLER (Bottom-Up Erosion)
+        # Most "black bars" are at the very bottom. We erode just the bottom edge.
+        bottom_edge = int(height * 0.85)
+        mask[bottom_edge:, :] = ndimage.binary_erosion(mask[bottom_edge:, :], iterations=2)
+
+        # 6. STRUCTURAL INTEGRITY
         mask = ndimage.binary_fill_holes(mask)
-        mask = ndimage.binary_erosion(mask, iterations=2)
+        mask = ndimage.binary_closing(mask, structure=np.ones((3,3)))
 
-        # 5. KILL WINGS (Final X-Axis Crop)
-        # Any pixel outside the x_min/x_max is forced to transparent
+        # 7. FINAL CLIP
         final_mask = np.zeros_like(mask)
         final_mask[:, x_min:x_max] = mask[:, x_min:x_max]
 
-        # 6. EXPORT
+        # 8. EXPORT
         data[:, :, 3] = (final_mask * 255).astype(np.uint8)
         Image.fromarray(data).save(output_path)
         return 0
@@ -58,7 +62,3 @@ def remove_background(input_path, output_path):
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-
-if __name__ == "__main__":
-    if len(sys.argv) == 3:
-        sys.exit(remove_background(sys.argv[1], sys.argv[2]))
