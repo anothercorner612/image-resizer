@@ -14,50 +14,55 @@ def remove_background(input_path, output_path):
         alpha = data[:, :, 3]
         r, g, b = data[:,:,0].astype(float), data[:,:,1].astype(float), data[:,:,2].astype(float)
 
-        # 1. SCANNER MASK (Anything not pure scanner-white)
-        # We use 252 to be very strict about what counts as 'background'
-        is_not_white = (r < 252) | (g < 252) | (b < 252)
+        # 1. DEFINE "TRUE" BACKGROUND
+        # Anything very close to the scanner-bed white is background.
+        # We use 253 to be extremely precise.
+        is_pure_white = (r > 252) & (g > 252) & (b > 252)
         
-        # 2. INITIAL COMBINED MASK
-        combined_mask = (alpha > 80) | is_not_white
+        # 2. THE MASK (Safety First)
+        # Keep what the AI found, BUT if it's pure white, make it transparent.
+        # Keep everything else that isn't pure white.
+        mask = (alpha > 50) | (~is_pure_white)
 
-        # 3. THE "ISLAND KILLER" (Connectivity Analysis)
-        # This identifies every separate 'blob' in the image.
-        label_im, nb_labels = ndimage.label(combined_mask)
-        if nb_labels > 1:
-            # Find the size of every blob
-            sizes = ndimage.sum(combined_mask, label_im, range(nb_labels + 1))
-            # The largest blob is our product. Everything else is 'dust' or 'bars'.
-            mask_largest = (label_im == np.argmax(sizes))
-        else:
-            mask_largest = combined_mask
+        # 3. TOP/BOTTOM CLEANER (The Black Bar Fix)
+        # Instead of deleting islands, we just 'shave' the very edges where 
+        # scanner bars and shadows usually live.
+        height, width = data.shape[:2]
+        # Force a 2% crop at top and bottom to kill hinge shadows
+        edge_h = int(height * 0.02)
+        mask[:edge_h, :] = 0
+        mask[-edge_h:, :] = 0
 
-        # 4. HEAL AND FILL
-        # This ensures the envelope stays solid and corners stay sharp
-        final_mask = ndimage.binary_fill_holes(mask_largest)
-        final_mask = ndimage.binary_closing(final_mask, structure=np.ones((3,3)))
+        # 4. HOLE FILLING (Protects the envelope)
+        # This fills in any "eaten" spots in the middle of the book or envelope.
+        mask = ndimage.binary_fill_holes(mask)
+        # Smooth the edges slightly
+        mask = ndimage.binary_closing(mask, structure=np.ones((3,3)))
 
-        # 5. CROP TO CONTENT (Fixes the "Too Small" / Scaling issue)
-        # We find the exact edges of the product and 'crop' the mask to it
-        coords = np.argwhere(final_mask)
+        # 5. GEOMETRIC BOUNDS (For the .8 Scaling)
+        # Find the product, then clear a 15px buffer around it.
+        coords = np.argwhere(mask)
         if coords.size > 0:
-            y_min, x_min = coords.min(axis=0)
-            y_max, x_max = coords.max(axis=0)
+            y_min, x_min = coords.min(axis=0), coords.min(axis=1) # wait, correction:
+            y_min, x_min = coords[:, 0].min(), coords[:, 1].min()
+            y_max, x_max = coords[:, 0].max(), coords[:, 1].max()
             
-            # Wipe everything outside this tight box
-            cleaned_mask = np.zeros_like(final_mask)
-            cleaned_mask[y_min:y_max, x_min:x_max] = final_mask[y_min:y_max, x_min:x_max]
-            
-            # Force a 10px buffer of transparency at the VERY edges of the file
-            # This is the 'handshake' for the .8 scaling to work perfectly
-            cleaned_mask[:10, :] = 0
-            cleaned_mask[-10:, :] = 0
-            cleaned_mask[:, :10] = 0
-            cleaned_mask[:, -10:] = 0
-            final_mask = cleaned_mask
+            cleaned_mask = np.zeros_like(mask)
+            # Add a 5px safety padding so we don't clip the book's actual edge
+            cleaned_mask[max(0, y_min-5):min(height, y_max+5), 
+                         max(0, x_min-5):min(width, x_max+5)] = mask[max(0, y_min-5):min(height, y_max+5), 
+                                                                    max(0, x_min-5):min(width, x_max+5)]
+            mask = cleaned_mask
 
-        # 6. EXPORT
-        data[:, :, 3] = (final_mask * 255).astype(np.uint8)
+        # 6. FINAL SHARP BORDER
+        # This is the "Handshake" that tells JavaScript exactly where the book is.
+        mask[:10, :] = 0
+        mask[-10:, :] = 0
+        mask[:, :10] = 0
+        mask[:, -10:] = 0
+
+        # 7. EXPORT
+        data[:, :, 3] = (mask * 255).astype(np.uint8)
         Image.fromarray(data).save(output_path)
         return 0
 
@@ -69,4 +74,4 @@ def remove_background(input_path, output_path):
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
-        sys.exit(remove_background(sys.argv[1], sys.argv[2]))
+        sys.exit(remove_background
