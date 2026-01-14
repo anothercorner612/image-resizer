@@ -1,44 +1,58 @@
-const sharp = require('sharp');
-const path = require('path');
-const fs = require('fs').promises;
-const { existsSync } = require('fs'); // Added for safety check
-const { spawn } = require('child_process');
+import sharp from 'sharp';
+import path from 'path';
+import { promises as fs, existsSync } from 'fs';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 
-class ImageProcessor {
-  constructor(config) {
+// Fix for __dirname in ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export class ImageProcessor {
+ constructor(config) {
     this.config = config;
-    // We use 'python3' because your terminal says (venv) is active
-    this.pythonPath = 'python3'; 
-    
-    // This is the fix: go UP from /src to the root to find the script
-    this.scriptPath = path.join(__dirname, '..', 'remove_bg.py');
 
-    console.log("--- DEBUG INFO ---");
-    console.log(`Current Dir: ${__dirname}`);
-    console.log(`Looking for Python Script at: ${this.scriptPath}`);
+    // 1. Look for the path in your .env file first. 
+    // If it's not there, just use 'python3'.
+    this.pythonPath = process.env.PYTHON_PATH || 'python3'; 
+
+    // 2. Look for the script in the root folder (one level up from /src)
+    this.scriptPath = path.resolve(__dirname, '..', 'remove_bg.py');
+
+    console.log("--- SYSTEM CHECK ---");
+    console.log(`Python: ${this.pythonPath}`);
     
+    // 3. Double check if the script is actually there
     if (existsSync(this.scriptPath)) {
-      console.log("✅ Script found!");
+      console.log(`✅ Script found at: ${this.scriptPath}`);
     } else {
-      console.log("❌ Script NOT found at that path.");
+      // Fallback: Check if it's inside /src just in case
+      this.scriptPath = path.resolve(__dirname, 'remove_bg.py');
+      console.log(`⚠️  Checking fallback path: ${this.scriptPath}`);
     }
+    console.log("--------------------");
   }
 
-  async process(inputBuffer) {
-    // Save temp files in the root to keep things simple
-    const tempInput = path.join(__dirname, '..', `temp_in_${Date.now()}.png`);
-    const tempOutput = path.join(__dirname, '..', `temp_out_${Date.now()}.png`);
+  // RENAMED from 'process' to 'processImage' to match test_run.js
+  async processImage(inputBuffer, context = {}) {
+    console.log(`[DEBUG] Step 1: Writing temp files for ${context.title || 'image'}...`);
+    const tempInput = path.join(__dirname, `temp_in_${Date.now()}.png`);
+    const tempOutput = path.join(__dirname, `temp_out_${Date.now()}.png`);
 
     try {
       await fs.writeFile(tempInput, inputBuffer);
+
+      console.log(`[DEBUG] Step 2: Running Python background removal...`);
       await this.runPythonRemoveBg(tempInput, tempOutput);
 
+      console.log(`[DEBUG] Step 3: Sharp processing (trim/resize/canvas)...`);
       let processedImage = sharp(tempOutput);
       const trimmedBuffer = await processedImage.trim().toBuffer();
       const metadata = await sharp(trimmedBuffer).metadata();
 
-      const canvasWidth = 2000;
-      const canvasHeight = 2500;
+      const canvasWidth = parseInt(this.config.canvasWidth) || 2000;
+      const canvasHeight = parseInt(this.config.canvasHeight) || 2500;
+      
       const targetHeight = Math.round(canvasHeight * 0.8);
       const scale = targetHeight / metadata.height;
       const targetWidth = Math.round(metadata.width * scale);
@@ -47,21 +61,34 @@ class ImageProcessor {
         .resize(targetWidth, targetHeight)
         .toBuffer();
 
-      return await sharp({
+      const finalBuffer = await sharp({
         create: {
           width: canvasWidth,
           height: canvasHeight,
           channels: 4,
-          background: '#f2f2f2'
+          background: this.config.backgroundColor || '#f2f2f2'
         }
       })
       .composite([{
         input: resizedProduct,
         gravity: 'center'
       }])
-      .png()
+      .webp({ quality: 85 }) // Matching the expected output format
       .toBuffer();
 
+      // Return the object format that test_run.js expects for its results
+      return {
+        buffer: finalBuffer,
+        scalingInfo: {
+          scaleFactor: scale,
+          originalSize: { width: metadata.width, height: metadata.height },
+          targetSize: { width: targetWidth, height: targetHeight }
+        }
+      };
+
+    } catch (error) {
+      console.error(`[DEBUG] Error in ImageProcessor:`, error.message);
+      throw error;
     } finally {
       await fs.unlink(tempInput).catch(() => {});
       await fs.unlink(tempOutput).catch(() => {});
@@ -72,9 +99,10 @@ class ImageProcessor {
     return new Promise((resolve, reject) => {
       const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
       
-      // Captures actual Python errors so we can see why it fails
-      py.stderr.on('data', (data) => console.error(`Python Error: ${data}`));
-      
+      // Capture Python errors or print statements
+      py.stderr.on('data', (data) => console.log(`[PYTHON]: ${data}`));
+      py.stdout.on('data', (data) => console.log(`[PYTHON]: ${data}`));
+
       py.on('close', (code) => {
         if (code === 0) resolve();
         else reject(new Error(`Python script failed with code ${code}`));
@@ -95,6 +123,41 @@ class ImageProcessor {
       return false;
     }
   }
-}
 
-module.exports = ImageProcessor;
+  /**
+   * Remove background from image buffer (testing method)
+   * @param {Buffer} buffer - Input image buffer
+   * @returns {Buffer} - Image buffer with background removed
+   */
+  async cleanupBackground(buffer) {
+    const tempDir = path.join(__dirname, '..', 'temp');
+    const timestamp = Date.now();
+    const inputPath = path.join(tempDir, `input_${timestamp}.png`);
+    const outputPath = path.join(tempDir, `output_${timestamp}.png`);
+
+    try {
+      // Create temp directory if it doesn't exist
+      await fs.mkdir(tempDir, { recursive: true });
+
+      // Write input buffer to temp file
+      await fs.writeFile(inputPath, buffer);
+
+      // Run Python background removal
+      await this.runPythonRemoveBg(inputPath, outputPath);
+
+      // Read result
+      const resultBuffer = await fs.readFile(outputPath);
+
+      // Clean up temp files
+      await fs.unlink(inputPath).catch(() => {});
+      await fs.unlink(outputPath).catch(() => {});
+
+      return resultBuffer;
+    } catch (error) {
+      // Clean up on error
+      await fs.unlink(inputPath).catch(() => {});
+      await fs.unlink(outputPath).catch(() => {});
+      throw error;
+    }
+  }
+}
