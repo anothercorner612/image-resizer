@@ -1,26 +1,35 @@
-import sys, os, io
-import numpy as np
-import cv2
-from PIL import Image, ImageCms
-from scipy import ndimage
-import withoutbg
-
-os.makedirs("test_results", exist_ok=True)
-
-def save_result(name, data):
-    print(f"✅ Generated: {name}")
-    Image.fromarray(data).save(os.path.join("test_results", f"{name}.png"))
-
 def run_comparison(input_path):
-    print(f"🚀 Running comparison for: {input_path}")
+    print(f"🚀 Running FOCUS-CROP comparison for: {input_path}")
     model = withoutbg.WithoutBG.opensource()
     
+    # 1. Load original
     pil_img = Image.open(input_path).convert("RGBA")
+    width, height = pil_img.size
+
+    # 2. APPLY FOCUS CROP (Remove outer 15% to kill text/icons)
+    # This prevents the AI from trying to "include" the ladder text in the mask
+    left = width * 0.15
+    top = height * 0.15
+    right = width * 0.85
+    bottom = height * 0.85
+    focused_img = pil_img.crop((left, top, right, bottom))
+    
+    # 3. GET BASE AI MASK (From the cropped version)
+    base_ai_result = model.remove_background(focused_img)
+    cropped_alpha = np.array(base_ai_result.convert("RGBA"))[:, :, 3]
+
+    # 4. RE-EXPAND MASK (Put the mask back into full-size frame)
+    # We need a full-size black alpha channel to start
+    full_alpha = np.zeros((height, width), dtype=np.uint8)
+    # Paste the AI's mask back into the center
+    full_alpha[int(top):int(bottom), int(left):int(right)] = cropped_alpha
+
+    # 5. PREPARE FULL SIZE DATA FOR OPTIONS
     original_np = np.array(pil_img)
     gray_guide = cv2.cvtColor(original_np[:,:,:3], cv2.COLOR_RGBA2GRAY)
     
-    base_ai_result = model.remove_background(input_path)
-    base_alpha = np.array(base_ai_result.convert("RGBA"))[:, :, 3]
+    # Update base_alpha so all 6 options use the cleaned focus-mask
+    base_alpha = full_alpha
 
     # --- OPTION 1: Matting (Guided Filter) ---
     if hasattr(cv2, 'ximgproc'):
@@ -28,8 +37,8 @@ def run_comparison(input_path):
         opt1 = original_np.copy()
         opt1[:, :, 3] = refined_alpha
         save_result("01_matting_filter", opt1)
-    else:
-        print("⚠️ Skipping Option 1: opencv-contrib-python not fully recognized.")
+
+    # ... [The rest of the options (02-06) stay exactly the same as before] ...
 
     # --- OPTION 2: Geometry Guardian ---
     opt2_alpha = base_alpha.copy()
