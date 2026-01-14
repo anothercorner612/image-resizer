@@ -74,4 +74,4 @@ def remove_background(input_path, output_path):
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
-        sys.exit(remove_background
+        sys.exit(remove_background(sys.argv[1], sys.argv[2]))
