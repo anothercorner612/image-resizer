@@ -26,59 +26,46 @@ def process_logic(input_path, image_stem):
         Image.fromarray(res).save(os.path.join(OUTPUT_ROOT, rel_path))
         image_results.append((name, rel_path))
 
-    # --- 1. THE "COLOR SENSOR" HYBRIDS (Great for the Ladder) ---
-    # Looks for any color that ISN'T the background corner color
-    bg_color_hsv = hsv[5, 5].astype(int)
-    lower_bg = np.array([max(0, bg_color_hsv[0]-10), 20, 20])
-    upper_bg = np.array([min(180, bg_color_hsv[0]+10), 255, 255])
-    bg_mask = cv2.inRange(hsv, lower_bg, upper_bg)
-    save_v("hsv_bg_dist", cv2.bitwise_not(bg_mask))
+    # --- 1. GLOBAL THRESHOLDING (Steps of 5) ---
+    # 6 Variations
+    for val in range(225, 255, 5):
+        _, t = cv2.threshold(gray, val, 255, cv2.THRESH_BINARY_INV)
+        save_v(f"01_threshold_{val}", t)
 
-    # --- 2. THE "LADDER SHIELD" (Lab Color space) ---
-    # Separates based on A/B channels (Pink/Green and Blue/Yellow)
+    # --- 2. CHROMA SHIELD (Lab Color Distance) ---
+    # 5 Variations - Higher = more 'color' needed to stay
     l, a, b_chan = cv2.split(lab)
-    a_dist = cv2.absdiff(a, 128)
-    b_dist = cv2.absdiff(b_chan, 128)
-    chroma = cv2.addWeighted(a_dist, 0.5, b_dist, 0.5, 0)
-    _, chroma_t = cv2.threshold(chroma, 10, 255, cv2.THRESH_BINARY)
-    save_v("lab_chroma_shield", chroma_t)
+    chroma = cv2.addWeighted(cv2.absdiff(a, 128), 0.5, cv2.absdiff(b_chan, 128), 0.5, 0)
+    for c_tol in [4, 8, 12, 16, 20]:
+        _, c_mask = cv2.threshold(chroma, c_tol, 255, cv2.THRESH_BINARY)
+        save_v(f"02_chroma_shield_tol_{c_tol}", c_mask)
 
-    # --- 3. RECURSIVE EDGE-BLOCK (Stronger version of your favorite) ---
-    edges = cv2.Canny(gray, 20, 80)
-    wall = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=2)
-    for d in [6, 15]:
+    # --- 3. EDGE-BLOCKED FLOODFILL (The 'Wall' Logic) ---
+    # 6 Variations - Testing different 'leak' sensitivities
+    edges = cv2.Canny(gray, 20, 100)
+    wall = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
+    for d in [2, 4, 8, 12, 18, 25]:
         f_m = np.zeros((height + 2, width + 2), np.uint8)
         temp_rgb = rgb.copy()
-        temp_rgb[wall == 255] = [0, 0, 0] # Burn edges to stop leaks
+        temp_rgb[wall == 255] = [0, 0, 0] 
         cv2.floodFill(temp_rgb, f_m, (0,0), (255,255,255), (d,)*3, (d,)*3, 8)
-        save_v(f"wall_flood_tol_{d}", np.where(f_m[1:-1, 1:-1] == 1, 0, 255).astype(np.uint8))
+        save_v(f"03_edge_flood_tol_{d}", np.where(f_m[1:-1, 1:-1] == 1, 0, 255).astype(np.uint8))
 
-    # --- 4. THE "VAN PROTECTOR" (Sat + Dark Hybrid) ---
-    # Protects pixels that are either Dark (ink) or Colorful (van body)
+    # --- 4. HYBRID SATURATION + INK (Shadow Protection) ---
+    # 5 Variations - Protects colors and dark lines
     sat_mask = cv2.threshold(hsv[:,:,1], 10, 255, cv2.THRESH_BINARY)[1]
-    dark_mask = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)[1]
+    dark_mask = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)[1]
     shield = cv2.bitwise_or(sat_mask, dark_mask)
-    for g_v in [240, 245]:
+    for g_v in [235, 240, 245, 250]:
         g_mask = cv2.threshold(gray, g_v, 255, cv2.THRESH_BINARY_INV)[1]
-        save_v(f"ink_sat_hybrid_{g_v}", cv2.bitwise_or(g_mask, shield))
+        save_v(f"04_ink_sat_hybrid_{g_v}", cv2.bitwise_or(g_mask, shield))
 
-    # --- 5. CENTER-WEIGHTED GRABCUT (Computer Vision approach) ---
-    mask = np.zeros(rgb.shape[:2], np.uint8)
-    bgd = np.zeros((1, 65), np.float64); fgd = np.zeros((1, 65), np.float64)
-    rect = (10, 10, width-20, height-20)
-    try:
-        cv2.grabCut(rgb, mask, rect, bgd, fgd, 3, cv2.GC_INIT_WITH_RECT)
-        gc_mask = np.where((mask==2)|(mask==0), 0, 255).astype('uint8')
-        save_v("grabcut_center", gc_mask)
-    except: pass
-
-    # --- 6. MULTI-CHANNEL MAX ---
-    # Takes the strongest signal from R, G, and B thresholds
-    r, g, b_c = cv2.split(rgb)
-    _, rt = cv2.threshold(r, 245, 255, cv2.THRESH_BINARY_INV)
-    _, gt = cv2.threshold(g, 245, 255, cv2.THRESH_BINARY_INV)
-    _, bt = cv2.threshold(b_c, 245, 255, cv2.THRESH_BINARY_INV)
-    save_v("max_channel_threshold", cv2.bitwise_or(rt, cv2.bitwise_or(gt, bt)))
+    # --- 5. COLOR DISTANCE (From Top-Left Corner) ---
+    # 6 Variations - Higher = removes less color
+    bg_color = rgb[5, 5].astype(float)
+    dist_map = np.sqrt(np.sum((rgb.astype(float) - bg_color)**2, axis=2))
+    for d_tol in [10, 20, 30, 40, 50, 60]:
+        save_v(f"05_color_dist_{d_tol}", np.where(dist_map > d_tol, 255, 0).astype(np.uint8))
 
     return image_results
 
@@ -91,8 +78,8 @@ def run_comparison(target_path):
             background-image: linear-gradient(45deg, #333 25%, transparent 25%), linear-gradient(-45deg, #333 25%, transparent 25%),
             linear-gradient(45deg, transparent 75%, #333 75%), linear-gradient(-45deg, transparent 75%, #333 75%);
             background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px; }
-        h2 { color: #ff9f43; margin-top: 30px; }
-    </style></head><body><h1>Logic Stress-Test Gallery</h1>"""
+        h2 { color: #ff9f43; margin-top: 30px; border-bottom: 2px solid #ff9f43; display: inline-block; }
+    </style></head><body><h1>Background Removal Logic Comparison</h1>"""
 
     if os.path.isdir(target_path):
         images = [f for f in os.listdir(target_path) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
