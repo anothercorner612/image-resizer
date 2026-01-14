@@ -47,9 +47,11 @@ def process_logic(input_path, image_stem):
         save_v(f"01_Geo_Fill_Tol_{d}", geo_mask)
 
     # --- 2. LAB B-CHANNEL DISTANCE (The Yellow-Background Specialist) ---
-    # This is purely color-based, ignoring how bright or dark the rungs are.
     l, a_ch, b_ch = cv2.split(lab)
-    bg_b_val = b_ch[5,5] # Sample background yellow/blue value
+    
+    # FIX: Cast to int to avoid OpenCV Overload error
+    bg_b_val = int(b_ch[5,5]) 
+    
     diff_b = cv2.absdiff(b_ch, bg_b_val)
     for t_val in [12, 24, 36]:
         _, b_mask = cv2.threshold(diff_b, t_val, 255, cv2.THRESH_BINARY)
