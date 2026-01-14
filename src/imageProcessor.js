@@ -1,55 +1,99 @@
-import sys, os
-import numpy as np
-from PIL import Image
-from scipy import ndimage
-import withoutbg
+import sharp from 'sharp';
+import path from 'path';
+import { promises as fs } from 'fs';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 
-def remove_background(input_path, output_path):
-    try:
-        model = withoutbg.WithoutBG.opensource()
-        result_image = model.remove_background(input_path)
-        img_rgba = result_image.convert("RGBA")
-        data = np.array(img_rgba)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export class ImageProcessor {
+  constructor(config) {
+    this.config = config;
+    this.pythonPath = process.env.PYTHON_PATH || 'python3';
+    this.scriptPath = path.resolve(__dirname, '..', 'remove_bg.py');
+  }
+
+  async processImage(inputBuffer, context = {}) {
+    const tempInput = path.join(__dirname, `temp_in_${Date.now()}.png`);
+    const tempOutput = path.join(__dirname, `temp_out_${Date.now()}.png`);
+
+    try {
+      await fs.writeFile(tempInput, inputBuffer);
+
+      console.log(`[DEBUG] Step 2: Running Python background removal for ${context.title || 'image'}...`);
+      await this.runPythonRemoveBg(tempInput, tempOutput);
+
+      // --- FIX: Added threshold to trim to ignore stray pixels ---
+      const trimmedBuffer = await sharp(tempOutput)
+        .trim({ threshold: 10 }) 
+        .toBuffer();
         
-        alpha = data[:, :, 3]
-        r, g, b = data[:,:,0].astype(float), data[:,:,1].astype(float), data[:,:,2].astype(float)
+      const metadata = await sharp(trimmedBuffer).metadata();
 
-        # 1. ROBUST MASK (Reject scanner-white and keep AI results)
-        is_not_white = (r < 252) | (g < 252) | (b < 252)
-        mask = (alpha > 100) | is_not_white
+      const canvasWidth = parseInt(this.config.canvasWidth) || 2000;
+      const canvasHeight = parseInt(this.config.canvasHeight) || 2500;
+      const maxAllowedWidth = Math.round(canvasWidth * 0.75); 
+      const maxAllowedHeight = Math.round(canvasHeight * 0.75);
 
-        # 2. FILL INTERNAL GAPS (Protects envelopes)
-        mask = ndimage.binary_fill_holes(mask)
+      let targetHeight = maxAllowedHeight;
+      let scale = targetHeight / metadata.height;
+      let targetWidth = Math.round(metadata.width * scale);
 
-        # 3. ISLAND KILLER (Remove any stray pixels not touching the book)
-        label_im, nb_labels = ndimage.label(mask)
-        if nb_labels > 1:
-            sizes = ndimage.sum(mask, label_im, range(nb_labels + 1))
-            mask = (label_im == np.argmax(sizes))
+      if (targetWidth > maxAllowedWidth) {
+        targetWidth = maxAllowedWidth;
+        scale = targetWidth / metadata.width;
+        targetHeight = Math.round(metadata.height * scale);
+      }
 
-        # 4. HARD BINARY CLEANUP
-        # We convert the mask to a hard 0 or 255. No semi-transparency in background.
-        cleaned_alpha = (mask * 255).astype(np.uint8)
+      const resizedProduct = await sharp(trimmedBuffer)
+        .resize(targetWidth, targetHeight)
+        .toBuffer();
 
-        # 5. THE "GUTTER"
-        # Force the absolute edges to 0 so JS 'trim' has a guaranteed starting point
-        h, w = cleaned_alpha.shape
-        cleaned_alpha[:15, :] = 0
-        cleaned_alpha[-15:, :] = 0
-        cleaned_alpha[:, :15] = 0
-        cleaned_alpha[:, -15:] = 0
+      const finalBuffer = await sharp({
+        create: {
+          width: canvasWidth,
+          height: canvasHeight,
+          channels: 4,
+          background: this.config.backgroundColor || '#f3f3f4'
+        }
+      })
+      .composite([{
+        input: resizedProduct,
+        gravity: 'center'
+      }])
+      .webp({ quality: 92 })
+      .toBuffer();
 
-        # 6. EXPORT
-        data[:, :, 3] = cleaned_alpha
-        Image.fromarray(data).save(output_path)
-        return 0
+      return {
+        buffer: finalBuffer,
+        scalingInfo: {
+          scaleFactor: scale,
+          originalSize: { width: metadata.width, height: metadata.height },
+          targetSize: { width: targetWidth, height: targetHeight }
+        }
+      };
 
-    except Exception as e:
-        print(f"Python Error: {e}", file=sys.stderr)
-        if 'result_image' in locals():
-            result_image.save(output_path)
-        return 0
+    } catch (error) {
+      console.error(`[DEBUG] Error in ImageProcessor:`, error.message);
+      throw error;
+    } finally {
+      await Promise.all([
+        fs.unlink(tempInput).catch(() => {}),
+        fs.unlink(tempOutput).catch(() => {})
+      ]);
+    }
+  }
 
-if __name__ == "__main__":
-    if len(sys.argv) == 3:
-        sys.exit(remove_background(sys.argv[1], sys.argv[2]))
+  runPythonRemoveBg(input, output) {
+    return new Promise((resolve, reject) => {
+      const py = spawn(this.pythonPath, [this.scriptPath, input, output]);
+      py.stderr.on('data', (data) => console.log(`[PYTHON]: ${data}`));
+      py.stdout.on('data', (data) => console.log(`[PYTHON]: ${data}`));
+      py.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Python script failed with code ${code}`));
+      });
+    });
+  }
+}
