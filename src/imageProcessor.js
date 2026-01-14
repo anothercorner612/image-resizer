@@ -37,8 +37,8 @@ export class ImageProcessor {
       // 4. Calculate Canvas Scaling (Ensures image never exceeds canvas bounds)
       const canvasWidth = parseInt(this.config.canvasWidth) || 2000;
       const canvasHeight = parseInt(this.config.canvasHeight) || 2500;
-      const maxAllowedWidth = Math.round(canvasWidth * 0.80); // 85% safety margin
-      const maxAllowedHeight = Math.round(canvasHeight * 0.80);
+      const maxAllowedWidth = Math.round(canvasWidth * 0.75); // 75% safety margin
+      const maxAllowedHeight = Math.round(canvasHeight * 0.75);
 
       let targetHeight = maxAllowedHeight;
       let scale = targetHeight / metadata.height;
