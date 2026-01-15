@@ -8,7 +8,7 @@ from torchvision import transforms
 
 # --- CONFIGURATION ---
 HF_TOKEN = "your_token_here"  # <--- Update this
-INPUT_FOLDER = "/Users/leefrank/Desktop/test_batch"
+INPUT_FOLDER = "/Users/leefrank/Desktop/test"
 OUTPUT_FOLDER = "/Users/leefrank/Desktop/BRIA_FINAL_PRODUCTION"
 
 # SETTINGS
@@ -84,7 +84,7 @@ def process_image(img_path, file_name):
     # Export
     save_path = os.path.join(OUTPUT_FOLDER, f"{base_name}.{OUTPUT_FORMAT.lower()}")
     if OUTPUT_FORMAT == "WEBP":
-        result.save(save_path, "WEBP", quality=85, method=6)
+        result.save(save_path, "WEBP", quality=95, method=6)
     else:
         # PNG Quantization for small file size
         alpha = result.getchannel('A')
