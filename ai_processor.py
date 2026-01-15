@@ -1,47 +1,33 @@
 import os
 import torch
 import numpy as np
-from PIL import Image
+import cv2
+from PIL import Image, ImageEnhance
 from transformers import AutoModelForImageSegmentation
 from torchvision import transforms
-from transparent_background import Remover
-from carvekit.api.high import HiInterface
-from rembg import remove, new_session
 
 # --- CONFIG ---
-HF_TOKEN = os.getenv("HF_TOKEN") 
+HF_TOKEN = os.getenv("HF_TOKEN")
 INPUT_FOLDER = "/Users/leefrank/Desktop/test"
-OUTPUT_FOLDER = "/Users/leefrank/Desktop/ULTIMATE_BATTLE"
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+BASE_OUTPUT = "/Users/leefrank/Desktop/BRIA_COMPARISON"
 
-# Device selection for Mac M1/M2/M3
+# Subfolders for the two runs
+FOLDERS = {
+    "standard": os.path.join(BASE_OUTPUT, "BRIA_STANDARD"),
+    "optimized": os.path.join(BASE_OUTPUT, "BRIA_OPTIMIZED")
+}
+for f in FOLDERS.values(): os.makedirs(f, exist_ok=True)
+
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-print(f"💻 Device: {device.upper()}")
+print(f"🚀 Initializing on {device.upper()}...")
 
-# --- Load Engines ---
-print("⏳ Loading Bria RMBG-2.0...")
-bria_model = AutoModelForImageSegmentation.from_pretrained(
-    'briaai/RMBG-2.0', 
-    trust_remote_code=True,
-    token=HF_TOKEN
+# Load Model
+model = AutoModelForImageSegmentation.from_pretrained(
+    'briaai/RMBG-2.0', trust_remote_code=True, token=HF_TOKEN
 ).to(device).eval()
 
-print("⏳ Loading BiRefNet...")
-biref_session = new_session("birefnet-general")
-
-print("⏳ Loading InSPyReNet...")
-inspyre_remover = Remover()
-
-print("⏳ Loading CarveKit (High-Res)...")
-# FIX: Using the correct arguments for CarveKit
-carve_interface = HiInterface(
-    object_type="object", 
-    batch_size_seg=1, 
-    batch_size_matting=1, 
-    device=device
-)
-
-def run_bria(img):
+# --- RUN 1: STANDARD (No Adjustments) ---
+def run_standard(img):
     transform = transforms.Compose([
         transforms.Resize((1024, 1024)),
         transforms.ToTensor(),
@@ -49,47 +35,60 @@ def run_bria(img):
     ])
     input_tensor = transform(img.convert("RGB")).unsqueeze(0).to(device)
     with torch.no_grad():
-        preds = bria_model(input_tensor)[-1].sigmoid().cpu()
+        preds = model(input_tensor)[-1].sigmoid().cpu()
     mask = transforms.ToPILImage()(preds[0].squeeze()).resize(img.size)
     res = img.convert("RGBA")
     res.putalpha(mask)
     return res
 
-def start_battle():
-    files = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-    print(f"🚀 Found {len(files)} images. Starting Battle...")
+# --- RUN 2: OPTIMIZED (Contrast + Threshold + Dilation) ---
+def run_optimized(img):
+    # 1. Adaptive Contrast Pre-pass
+    enhancer = ImageEnhance.Contrast(img)
+    detection_img = enhancer.enhance(1.4) # Makes the 'edge' more obvious to the AI
+    
+    # 2. Inference at 768px (Focuses on object shape, ignores micro-noise)
+    transform = transforms.Compose([
+        transforms.Resize((768, 768)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    input_tensor = transform(detection_img.convert("RGB")).unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        preds = model(input_tensor)[-1].sigmoid().cpu()
+    
+    mask_np = preds[0].squeeze().numpy()
+    
+    # 3. Alpha Thresholding (Kills the gray 'fog' completely)
+    mask_binary = (mask_np > 0.35).astype(np.uint8) * 255
+    
+    # 4. OpenCV-based Dilation (Recovers edges of white pages)
+    kernel = np.ones((3, 3), np.uint8)
+    mask_refined = cv2.dilate(mask_binary, kernel, iterations=1)
+    
+    mask_pil = Image.fromarray(mask_refined).resize(img.size, Image.LANCZOS)
+    res = img.convert("RGBA")
+    res.putalpha(mask_pil)
+    return res
 
+def start_comparison():
+    files = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+    
     for img_name in files:
-        print(f"\n⚔️ Processing: {img_name}")
+        print(f"⚔️ Battling: {img_name}")
         path = os.path.join(INPUT_FOLDER, img_name)
-        original = Image.open(path).convert("RGB")
+        original = Image.open(path)
         base = os.path.splitext(img_name)[0]
 
-        # 1. Bria RMBG-2.0
-        try:
-            run_bria(original).save(os.path.join(OUTPUT_FOLDER, f"{base}_1_BRIA.png"))
-            print(" ✅ Bria Success")
-        except Exception as e: print(f" ❌ Bria Failed: {e}")
+        # Process Standard
+        std_res = run_standard(original)
+        std_res.save(os.path.join(FOLDERS["standard"], f"{base}_STD.png"))
 
-        # 2. BiRefNet
-        try:
-            remove(original, session=biref_session).save(os.path.join(OUTPUT_FOLDER, f"{base}_2_BIREFNET.png"))
-            print(" ✅ BiRefNet Success")
-        except Exception as e: print(f" ❌ BiRefNet Failed: {e}")
-
-        # 3. InSPyReNet
-        try:
-            insp_raw = inspyre_remover.process(original, type='rgba')
-            Image.fromarray(np.uint8(insp_raw)).save(os.path.join(OUTPUT_FOLDER, f"{base}_3_INSPYRE.png"))
-            print(" ✅ InSPyReNet Success")
-        except Exception as e: print(f" ❌ InSPyReNet Failed: {e}")
-
-        # 4. CarveKit
-        try:
-            carve_out = carve_interface([original])[0]
-            carve_out.save(os.path.join(OUTPUT_FOLDER, f"{base}_4_CARVEKIT.png"))
-            print(" ✅ CarveKit Success")
-        except Exception as e: print(f" ❌ CarveKit Failed: {e}")
+        # Process Optimized
+        opt_res = run_optimized(original)
+        opt_res.save(os.path.join(FOLDERS["optimized"], f"{base}_OPT.png"))
 
 if __name__ == "__main__":
-    start_battle()
+    start_comparison()
+    print(f"\n🏁 Finished! Open {BASE_OUTPUT} to compare.")
