@@ -9,61 +9,60 @@ from rembg import remove, new_session
 BASE_INPUT = Path.home() / "Desktop" / "AI_TEST_INPUT"
 BASE_OUTPUT = Path.home() / "Desktop" / "AI_TEST_RESULTS"
 
-def surgical_logic(mask_np, strategy):
-    """Applies specific 'Intensity' based on the folder."""
+def surgical_math(mask_np, strategy):
+    """Applies exact math logic and trimming per folder requirements."""
     
-    # 1. SET INTENSITY
+    # 1. SET INTENSITY & LOGIC
     if strategy == "Complex_Fix":
-        trim_strength = 12    # Deep trim for bad backgrounds
-        fill_holes = True     # Fixes David Campany text holes
-        smooth_blur = 5
+        trim = 5         # Light trim (U2Net is already precise)
+        mode = cv2.RETR_EXTERNAL # IGNORE internal text holes
+        blur = 3
     elif strategy == "3D_Objects":
-        trim_strength = 2     # Very light trim to keep detail
-        fill_holes = True     # Keeps keychains solid
-        smooth_blur = 7       # Extra smoothing for jagged edges
+        trim = 2         # Minimal trim to keep 3D texture
+        mode = cv2.RETR_TREE     # Keep natural internal lines
+        blur = 7         # High blur to fix jagged outlines
     elif strategy == "Wavy_Spreads":
-        trim_strength = 5     # Medium trim
-        fill_holes = True 
-        smooth_blur = 3
+        trim = 6         # Deep trim to kill floor shadows
+        mode = cv2.RETR_EXTERNAL
+        blur = 3
     else: # Flat_Paper
-        trim_strength = 3     # Standard trim
-        fill_holes = True
-        smooth_blur = 3
+        trim = 3
+        mode = cv2.RETR_EXTERNAL
+        blur = 3
 
-    # 2. APPLY TRIM (Erosion)
+    # 2. EROSION: Trims the 'extra background' pixels inward
     kernel = np.ones((3,3), np.uint8)
-    mask_np = cv2.erode(mask_np, kernel, iterations=trim_strength)
+    mask_np = cv2.erode(mask_np, kernel, iterations=trim)
     
-    # 3. APPLY MATH
-    # RETR_EXTERNAL is only used for Paper/Complex to force the outer boundary
-    mode = cv2.RETR_EXTERNAL if strategy in ["Flat_Paper", "Complex_Fix"] else cv2.RETR_TREE
+    # 3. GEOMETRY Pass
     contours, _ = cv2.findContours(mask_np, mode, cv2.CHAIN_APPROX_SIMPLE)
-    
     final_mask = np.zeros_like(mask_np)
+    
     if contours:
         cnt = np.concatenate(contours)
-        
         if strategy in ["Flat_Paper", "Complex_Fix"]:
-            # Forces 90-degree rectangle for books
+            # Redraws the book as a solid rectangle (Forces text holes to close)
             rect = cv2.minAreaRect(cnt)
             box = cv2.boxPoints(rect).astype(int)
             cv2.fillPoly(final_mask, [box], 255)
         elif strategy == "Wavy_Spreads":
-            # Follows the curves of the pages
+            # Shrink-wraps the open pages
             hull = cv2.convexHull(cnt)
             cv2.drawContours(final_mask, [hull], -1, 255, thickness=cv2.FILLED)
         else:
-            # Keeps the natural 3D shape of objects
+            # 3D Objects: Keep natural shape but filled solid
             cv2.drawContours(final_mask, contours, -1, 255, thickness=cv2.FILLED)
             
-    # 4. FINAL SMOOTHING
-    final_mask = cv2.GaussianBlur(final_mask, (smooth_blur, smooth_blur), 0)
-    return final_mask
+    # 4. SMOOTHING: Fixes jagged 'staircase' edges
+    return cv2.GaussianBlur(final_mask, (blur, blur), 0)
 
 def run_processor():
-    print("🚀 Running Surgical AI Processor...")
+    print("🚀 Running Final Restored Multi-Model Processor...")
     os.makedirs(BASE_OUTPUT, exist_ok=True)
-    session = new_session("u2net")
+    
+    # Models: U2Net is the heavy-duty 'GreenScreen' engine
+    model_std = new_session("u2netp")
+    model_heavy = new_session("u2net")
 
     strategies = ["Flat_Paper", "3D_Objects", "Wavy_Spreads", "Complex_Fix"]
     all_files = []
@@ -73,26 +72,28 @@ def run_processor():
             all_files.extend([(f, s) for f in folder.glob("*") if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']])
 
     for i, (img_path, strategy) in enumerate(all_files, 1):
-        print(f"[{i}/{len(all_files)}] {strategy}: {img_path.name}")
+        # The David Campany Fix: Use the heavy model for Complex_Fix only
+        active_session = model_heavy if strategy == "Complex_Fix" else model_std
+        
+        print(f"[{i}/{len(all_files)}] {strategy} (Model: {'Heavy' if strategy=='Complex_Fix' else 'Standard'}): {img_path.name}")
         img = Image.open(img_path).convert("RGB")
         
-        # AI Background Removal
-        result = remove(img, session=session, alpha_matting=True)
+        # AI Pass
+        result = remove(img, session=active_session, alpha_matting=True)
         mask_np = np.array(result.split()[-1]) 
 
-        # Apply Surgical Logic
-        refined_mask = surgical_logic(mask_np, strategy)
+        # Surgical Math Pass
+        refined_mask = surgical_math(mask_np, strategy)
 
-        # Final Composite
+        # Composite & Crop
         final_img = img.convert("RGBA")
         final_img.putalpha(Image.fromarray(refined_mask))
         
-        # Crop the output
         bbox = final_img.getbbox()
         if bbox:
             final_img = final_img.crop(bbox)
             
-        final_img.save(BASE_OUTPUT / f"{img_path.stem}_{strategy}_SURGICAL.png")
+        final_img.save(BASE_OUTPUT / f"{img_path.stem}_{strategy}_FINAL.png")
 
 if __name__ == "__main__":
     run_processor()
