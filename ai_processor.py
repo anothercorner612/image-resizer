@@ -10,7 +10,7 @@ from dis_bg_remover import remove_background as dis_remove
 from rembg import remove, new_session
 
 # --- CONFIG ---
-INPUT_FOLDER = "/Users/leefrank/Desktop/test_batch"
+INPUT_FOLDER = "/Users/leefrank/Desktop/test"
 OUTPUT_FOLDER = "/Users/leefrank/Desktop/ULTIMATE_BATTLE"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
