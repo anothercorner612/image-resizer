@@ -1,67 +1,103 @@
 import os
 import io
+import webbrowser
 from rembg import remove, new_session
-from PIL import Image, ImageOps, ImageChops, ImageDraw
+from PIL import Image, ImageOps, ImageFilter, ImageChops, ImageDraw
 
 # --- CONFIGURATION ---
 INPUT_FOLDER = "/Users/leefrank/Desktop/test"
-OUTPUT_FOLDER = "transparent_cutouts_RECTANGLE_FORCE"
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+BASE_OUTPUT = "/Users/leefrank/Desktop/showdown_results"
+os.makedirs(BASE_OUTPUT, exist_ok=True)
 
-# BiRefNet is better at finding the initial 'extreme' corners
-session = new_session("birefnet-general")
+# Engines
+session_biref = new_session("birefnet-general")
+session_u2net = new_session("u2net")
 
-def process_rectangle_force():
+def apply_mask_logic(original, session, strategy):
+    padding = 100
+    # Strategy D inspired dark padding
+    prep = ImageOps.expand(original, border=padding, fill=(30, 30, 30))
+    prep_bytes = io.BytesIO()
+    prep.save(prep_bytes, format='PNG')
+    
+    # Generate Base AI Mask
+    mask_data = remove(prep_bytes.getvalue(), session=session, only_mask=True)
+    mask = Image.open(io.BytesIO(mask_data)).convert("L")
+    mask = mask.crop((padding, padding, mask.width - padding, mask.height - padding)).resize(original.size)
+    
+    if strategy == "RECT_FORCE":
+        # Pure geometric protection for rectangular items
+        bbox = mask.getbbox()
+        if bbox:
+            solid = Image.new("L", original.size, 0)
+            draw = ImageDraw.Draw(solid)
+            # 3px inset to kill background halos
+            draw.rectangle([bbox[0]+3, bbox[1]+3, bbox[2]-3, bbox[3]-3], fill=255)
+            mask = ImageChops.lighter(mask, solid)
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=1))
+
+    elif strategy == "HYBRID_SMART":
+        # Morphological Closing: Fill holes, keep shape
+        mask = mask.filter(ImageFilter.MaxFilter(5)) 
+        mask = mask.filter(ImageFilter.MinFilter(7)) # Stronger erosion to kill white bleeds
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=1))
+
+    elif strategy == "SOFT_MATTE":
+        # The 'Rescue D' style with alpha matting for smooth magazine curves
+        mask_data = remove(prep_bytes.getvalue(), session=session, only_mask=True, 
+                           alpha_matting=True, alpha_matting_foreground_threshold=240)
+        mask = Image.open(io.BytesIO(mask_data)).convert("L")
+        mask = mask.crop((padding, padding, mask.width - padding, mask.height - padding)).resize(original.size)
+
+    final = Image.new("RGBA", original.size, (0, 0, 0, 0))
+    final.paste(original, (0, 0), mask)
+    if final.getbbox(): final = final.crop(final.getbbox())
+    return final
+
+def run_showdown():
     valid_exts = ('.png', '.jpg', '.jpeg', '.webp', '.heic')
     files = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(valid_exts)]
+    
+    html_content = """
+    <html><head><style>
+        body { font-family: sans-serif; background: #1a1a1a; color: white; padding: 20px; }
+        .row { display: flex; align-items: center; margin-bottom: 40px; border-bottom: 1px solid #444; padding-bottom: 20px; overflow-x: auto; }
+        .img-container { margin-right: 15px; text-align: center; flex-shrink: 0; }
+        img { max-width: 300px; height: auto; border: 1px solid #555; 
+              background-image: linear-gradient(45deg, #333 25%, transparent 25%), linear-gradient(-45deg, #333 25%, transparent 25%), 
+              linear-gradient(45deg, transparent 75%, #333 75%), linear-gradient(-45deg, transparent 75%, #333 75%);
+              background-size: 20px 20px; }
+        h4 { margin: 5px 0; font-size: 12px; color: #aaa; }
+    </style></head><body><h2>🏆 Finalist Showdown</h2>"""
 
-    print(f"📐 Applying Rectangle Force to {len(files)} images...")
+    strategies = {
+        "1_BiRef_Hybrid": ("birefnet-general", "HYBRID_SMART"),
+        "2_BiRef_Rect": ("birefnet-general", "RECT_FORCE"),
+        "3_BiRef_Soft": ("birefnet-general", "SOFT_MATTE"),
+        "4_U2Net_Hybrid": ("u2net", "HYBRID_SMART")
+    }
 
-    for i, img_name in enumerate(files, 1):
-        try:
-            original = Image.open(os.path.join(INPUT_FOLDER, img_name)).convert("RGBA")
+    for img_name in files:
+        print(f"Processing {img_name}...")
+        html_content += f"<div class='row'><div class='img-container'><h4>ORIGINAL</h4><img src='{os.path.join(INPUT_FOLDER, img_name)}'></div>"
+        
+        orig_img = Image.open(os.path.join(INPUT_FOLDER, img_name)).convert("RGBA")
+        
+        for label, (model, strat) in strategies.items():
+            sess = session_biref if model == "birefnet-general" else session_u2net
+            result = apply_mask_logic(orig_img, sess, strat)
             
-            # 1. PREP WITH DARK PADDING (Strategy D style)
-            padding = 100
-            prep = ImageOps.expand(original, border=padding, fill=(30, 30, 30))
-            
-            prep_bytes = io.BytesIO()
-            prep.save(prep_bytes, format='PNG')
-            
-            # 2. GET INITIAL AI MASK
-            mask_data = remove(prep_bytes.getvalue(), session=session, only_mask=True)
-            mask = Image.open(io.BytesIO(mask_data)).convert("L")
-            mask = mask.crop((padding, padding, mask.width - padding, mask.height - padding)).resize(original.size)
+            # Save variation
+            save_name = f"{label}_{img_name}.webp"
+            result.save(os.path.join(BASE_OUTPUT, save_name), "WEBP", lossless=True)
+            html_content += f"<div class='img-container'><h4>{label}</h4><img src='{save_name}'></div>"
+        
+        html_content += "</div>"
 
-            # 3. RECTANGLE FORCE LOGIC
-            # This finds the bounding box of the magazine/page
-            bbox = mask.getbbox()
-            if bbox:
-                # Create a perfectly solid white rectangle based on the bbox
-                # We add a 2px 'buffer' to fix the top erosion
-                left, top, right, bottom = bbox
-                solid_rect = Image.new("L", original.size, 0)
-                draw = ImageDraw.Draw(solid_rect)
-                draw.rectangle([left-2, top-2, right+2, bottom+2], fill=255)
-                
-                # Combine the AI's detection with our solid rectangle
-                # 'Lighter' takes the maximum value (White > Black)
-                mask = ImageChops.lighter(mask, solid_rect)
-
-            # 4. FINAL ASSEMBLY
-            final = Image.new("RGBA", original.size, (0, 0, 0, 0))
-            final.paste(original, (0, 0), mask)
-            
-            # Crop to the new forced rectangle
-            final_bbox = final.getbbox()
-            if final_bbox:
-                final = final.crop(final_bbox)
-            
-            final.save(os.path.join(OUTPUT_FOLDER, f"{os.path.splitext(img_name)[0]}.webp"), "WEBP", lossless=True)
-            print(f"[{i}/{len(files)}] Rect-Forced: {img_name}          ", end="\r")
-
-        except Exception as e:
-            print(f"\n❌ Error on {img_name}: {e}")
+    html_content += "</body></html>"
+    with open(os.path.join(BASE_OUTPUT, "showdown_gallery.html"), "w") as f:
+        f.write(html_content)
+    webbrowser.open(f"file://{os.path.join(BASE_OUTPUT, 'showdown_gallery.html')}")
 
 if __name__ == "__main__":
-    process_rectangle_force()
+    run_showdown()
