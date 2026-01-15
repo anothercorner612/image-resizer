@@ -1,9 +1,14 @@
 import os
+import warnings
 import torch
 import numpy as np
+import cv2 # Used for the fusion resize
 from PIL import Image, ImageEnhance
 from transformers import AutoModelForImageSegmentation
 from torchvision import transforms
+
+# Suppress timm warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # --- CONFIG ---
 HF_TOKEN = "your_token_here" # <--- Update this
@@ -12,6 +17,8 @@ OUTPUT_FOLDER = "/Users/leefrank/Desktop/BRIA_WEBP_COMPARE"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+
+print("🚀 Loading Bria 2.0...")
 model = AutoModelForImageSegmentation.from_pretrained('briaai/RMBG-2.0', trust_remote_code=True, token=HF_TOKEN).to(device).eval()
 
 def get_mask(img, size=1024, contrast=1.0):
@@ -29,13 +36,13 @@ def get_mask(img, size=1024, contrast=1.0):
     return pred[0].squeeze().numpy()
 
 def save_as_webp(img, mask_np, base_name, suffix):
+    # Ensure mask matches original image size for the final save
     mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8)).resize(img.size, Image.LANCZOS)
     res = img.convert("RGBA")
     res.putalpha(mask_pil)
     
-    # Save as WebP for speed and smaller file size
     save_path = os.path.join(OUTPUT_FOLDER, f"{base_name}_{suffix}.webp")
-    res.save(save_path, "WEBP", quality=90, method=6)
+    res.save(save_path, "WEBP", quality=95, method=6)
 
 def run_experiment():
     files = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
@@ -50,7 +57,7 @@ def run_experiment():
         m1 = get_mask(orig, size=1024)
         save_as_webp(orig, m1, base, "1_STD")
 
-        # 2. DETAIL (High-Res 1280px - Targeted at the Ladder)
+        # 2. DETAIL (High-Res 1280px)
         m2 = get_mask(orig, size=1280)
         save_as_webp(orig, m2, base, "2_DETAIL")
 
@@ -58,9 +65,11 @@ def run_experiment():
         m3 = np.power(m1, 1.8) 
         save_as_webp(orig, m3, base, "3_GAMMA")
 
-        # 4. FUSION (Blends 768px Body + 1280px Detail)
+        # 4. FUSION (The Fixed One)
         m4_low = get_mask(orig, size=768)
-        m4_fused = (m4_low + m2) / 2
+        # Fix: Resize m4_low to 1280x1280 so it matches m2
+        m4_low_resized = cv2.resize(m4_low, (1280, 1280), interpolation=cv2.INTER_LINEAR)
+        m4_fused = (m4_low_resized + m2) / 2
         save_as_webp(orig, m4_fused, base, "4_FUSION")
 
         # 5. CONTRAST-HARD (Contrast Boost + Binary Cut)
