@@ -29,9 +29,17 @@ def process_battle():
         save_result(biref_raw, f"{base_name}_BIREFNET.webp")
 
         # 2. NEW ENGINE (InSPyReNet)
-        # InSPyReNet works on RGB, then returns RGBA
-        inspyre_raw = inspyre_remover.process(original.convert("RGB"), type='rgba')
-        save_result(Image.fromarray(inspyre_raw), f"{base_name}_INSPYRE.webp")
+        try:
+            # We explicitly tell numpy to handle the output before giving it to Pillow
+            import numpy as np
+            inspyre_result = inspyre_remover.process(original.convert("RGB"), type='rgba')
+            
+            # Convert the raw array into a proper PIL Image object
+            inspyre_rgba = Image.fromarray(np.uint8(inspyre_result)).convert("RGBA")
+            
+            save_result(inspyre_rgba, f"{base_name}_INSPYRE.webp")
+        except Exception as e:
+            print(f"InSPyReNet failed on {img_name}: {e}")
 
 def save_result(img, filename):
     # Standard centering/scaling logic
