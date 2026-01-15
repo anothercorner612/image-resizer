@@ -8,8 +8,8 @@ from torchvision import transforms
 
 # --- CONFIGURATION ---
 HF_TOKEN = "your_token_here" # <--- Update this
-INPUT_FOLDER = "test"        # Set to your 'test' folder
-OUTPUT_FOLDER = "output_rotated"
+INPUT_FOLDER = "/Users/leefrank/Desktop/test"        # Set to your 'test' folder
+OUTPUT_FOLDER = "/Users/leefrank/Desktop/test/tests"
 
 # TUNING PARAMETERS
 # Increase PADDING (e.g., 5 or 10) if the book edges feel 'chopped off'
