@@ -1,82 +1,108 @@
 import os
-import warnings
 import torch
 import numpy as np
-import cv2 # Used for the fusion resize
-from PIL import Image, ImageEnhance
+import cv2
+from PIL import Image
 from transformers import AutoModelForImageSegmentation
 from torchvision import transforms
 
-# Suppress timm warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
+# --- CONFIGURATION ---
+HF_TOKEN = "your_token_here"  # <--- Update this
+INPUT_FOLDER = "/Users/leefrank/Desktop/test_batch"
+OUTPUT_FOLDER = "/Users/leefrank/Desktop/BRIA_FINAL_PRODUCTION"
 
-# --- CONFIG ---
-HF_TOKEN = "your_token_here" # <--- Update this
-INPUT_FOLDER = "/Users/leefrank/Desktop/test"
-OUTPUT_FOLDER = "/Users/leefrank/Desktop/BRIA_WEBP_COMPARE"
+# SETTINGS
+OUTPUT_FORMAT = "WEBP" # Options: "WEBP" (Tiny) or "PNG" (Classic)
+FOG_THRESHOLD = 0.05   # Sensitivity for clearing background noise
+FORCE_RECTANGLE = True # SET TO TRUE to solve the David Campany/Full-Frame issue
+
+# Create output directory
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
+# Device Selection (M1/M2/M3 Mac = 'mps')
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
+# Load Bria 2.0
 print("🚀 Loading Bria 2.0...")
-model = AutoModelForImageSegmentation.from_pretrained('briaai/RMBG-2.0', trust_remote_code=True, token=HF_TOKEN).to(device).eval()
+model = AutoModelForImageSegmentation.from_pretrained(
+    'briaai/RMBG-2.0', 
+    trust_remote_code=True, 
+    token=HF_TOKEN
+).to(device).eval()
 
-def get_mask(img, size=1024, contrast=1.0):
-    temp_img = img.convert("RGB")
-    if contrast != 1.0: temp_img = ImageEnhance.Contrast(temp_img).enhance(contrast)
+def apply_smart_rectangle(orig_img, mask_np):
+    """Overrides AI holes by forcing a solid bounding box around the subject."""
+    # 1. Binarize the mask (find anything the AI 'thought' was foreground)
+    _, binary = cv2.threshold((mask_np * 255).astype(np.uint8), 20, 255, cv2.THRESH_BINARY)
     
+    # 2. Find the bounding coordinates of all detected 'bits'
+    coords = cv2.findNonZero(binary)
+    if coords is not None:
+        x, y, w, h = cv2.boundingRect(coords)
+        
+        # 3. Create a new solid mask for the rectangle
+        # This repairs text/white space holes in the David Campany cover
+        final_mask = np.zeros_like(mask_np)
+        final_mask[y:y+h, x:x+w] = 1.0
+        
+        mask_pil = Image.fromarray((final_mask * 255).astype(np.uint8)).resize(orig_img.size, Image.LANCZOS)
+    else:
+        # Fallback to standard mask if nothing detected
+        mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8)).resize(orig_img.size, Image.LANCZOS)
+    
+    return mask_pil
+
+def process_image(img_path, file_name):
+    orig = Image.open(img_path)
+    base_name = os.path.splitext(file_name)[0]
+    
+    # AI Processing
     t = transforms.Compose([
-        transforms.Resize((size, size)),
+        transforms.Resize((1024, 1024)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    input_tensor = t(temp_img).unsqueeze(0).to(device)
+    
+    input_tensor = t(orig.convert("RGB")).unsqueeze(0).to(device)
     with torch.no_grad():
-        pred = model(input_tensor)[-1].sigmoid().cpu()
-    return pred[0].squeeze().numpy()
-
-def save_as_webp(img, mask_np, base_name, suffix):
-    # Ensure mask matches original image size for the final save
-    mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8)).resize(img.size, Image.LANCZOS)
-    res = img.convert("RGBA")
-    res.putalpha(mask_pil)
+        preds = model(input_tensor)[-1].sigmoid().cpu()
     
-    save_path = os.path.join(OUTPUT_FOLDER, f"{base_name}_{suffix}.webp")
-    res.save(save_path, "WEBP", quality=95, method=6)
+    mask_np = preds[0].squeeze().numpy()
 
-def run_experiment():
-    files = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    # Apply Logic
+    if FORCE_RECTANGLE:
+        mask_pil = apply_smart_rectangle(orig, mask_np)
+    else:
+        # Standard Bria logic (clears fog)
+        mask_np[mask_np < FOG_THRESHOLD] = 0
+        mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8)).resize(orig.size, Image.LANCZOS)
     
-    for img_name in files:
-        print(f"🕵️‍♂️ Running 5-way WebP test: {img_name}")
-        img_path = os.path.join(INPUT_FOLDER, img_name)
-        orig = Image.open(img_path)
-        base = os.path.splitext(img_name)[0]
+    # Create final image
+    result = orig.convert("RGBA")
+    result.putalpha(mask_pil)
 
-        # 1. STANDARD (The Baseline)
-        m1 = get_mask(orig, size=1024)
-        save_as_webp(orig, m1, base, "1_STD")
-
-        # 2. DETAIL (High-Res 1280px)
-        m2 = get_mask(orig, size=1280)
-        save_as_webp(orig, m2, base, "2_DETAIL")
-
-        # 3. GAMMA (Gamma 1.8 - Clears background fog)
-        m3 = np.power(m1, 1.8) 
-        save_as_webp(orig, m3, base, "3_GAMMA")
-
-        # 4. FUSION (The Fixed One)
-        m4_low = get_mask(orig, size=768)
-        # Fix: Resize m4_low to 1280x1280 so it matches m2
-        m4_low_resized = cv2.resize(m4_low, (1280, 1280), interpolation=cv2.INTER_LINEAR)
-        m4_fused = (m4_low_resized + m2) / 2
-        save_as_webp(orig, m4_fused, base, "4_FUSION")
-
-        # 5. CONTRAST-HARD (Contrast Boost + Binary Cut)
-        m5_mask = get_mask(orig, size=1024, contrast=1.3)
-        m5_hard = np.where(m5_mask > 0.35, 1.0, 0.0)
-        save_as_webp(orig, m5_hard, base, "5_HARD")
+    # Export
+    save_path = os.path.join(OUTPUT_FOLDER, f"{base_name}.{OUTPUT_FORMAT.lower()}")
+    if OUTPUT_FORMAT == "WEBP":
+        result.save(save_path, "WEBP", quality=85, method=6)
+    else:
+        # PNG Quantization for small file size
+        alpha = result.getchannel('A')
+        quantized = result.quantize(colors=256, method=2).convert("RGBA")
+        quantized.putalpha(alpha)
+        quantized.save(save_path, "PNG", optimize=True)
+            
+    return os.path.getsize(save_path) / 1024 / 1024
 
 if __name__ == "__main__":
-    run_experiment()
-    print(f"\n✅ All variations saved to: {OUTPUT_FOLDER}")
+    images = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    print(f"📂 Found {len(images)} images. Mode: {'RECTANGLE FORCE' if FORCE_RECTANGLE else 'STANDARD'}")
+    
+    for i, name in enumerate(images):
+        try:
+            mb = process_image(os.path.join(INPUT_FOLDER, name), name)
+            print(f"[{i+1}/{len(images)}] ✅ {name} -> {mb:.2f} MB")
+        except Exception as e:
+            print(f"❌ Failed {name}: {e}")
+
+    print(f"\n✨ Completed! Files are in: {OUTPUT_FOLDER}")
