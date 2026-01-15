@@ -7,7 +7,7 @@ from torchvision import transforms
 
 # --- CONFIG ---
 HF_TOKEN = os.getenv("HF_TOKEN")
-INPUT_FOLDER = "/Users/leefrank/Desktop/test_batch"
+INPUT_FOLDER = "/Users/leefrank/Desktop/test"
 OUTPUT_FOLDER = "/Users/leefrank/Desktop/BRIA_COMPARE"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
