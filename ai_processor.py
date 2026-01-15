@@ -10,7 +10,7 @@ from rembg import remove, new_session
 
 # --- CONFIG ---
 HF_TOKEN = os.getenv("HF_TOKEN") 
-INPUT_FOLDER = "/Users/leefrank/Desktop/test_batch"
+INPUT_FOLDER = "/Users/leefrank/Desktop/test"
 OUTPUT_FOLDER = "/Users/leefrank/Desktop/ULTIMATE_BATTLE"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
