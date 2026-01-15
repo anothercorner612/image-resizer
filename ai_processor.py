@@ -4,8 +4,8 @@ from rembg import remove, new_session
 from PIL import Image, ImageOps, ImageFilter
 
 # --- CONFIGURATION ---
-INPUT_FOLDER = "/Users/leefrank/Desktop/full_library" 
-OUTPUT_FOLDER = "/Users/leefrank/Desktop/FINAL_PRODUCTION_UNIVERSAL"
+INPUT_FOLDER = "/Users/leefrank/Desktop/test" 
+OUTPUT_FOLDER = "/Users/leefrank/Desktop/showdown_results"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # BiRefNet is essential for your figurines and complex shapes
