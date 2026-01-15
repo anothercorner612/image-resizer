@@ -2,7 +2,7 @@ import os, io
 from rembg import remove, new_session
 from PIL import Image
 
-INPUT = "/Users/leefrank/Desktop/full_library" 
+INPUT = "/Users/leefrank/Desktop/test" 
 OUTPUT = "/Users/leefrank/Desktop/READY_FOR_STORE"
 os.makedirs(OUTPUT, exist_ok=True)
 session = new_session("birefnet-general")
