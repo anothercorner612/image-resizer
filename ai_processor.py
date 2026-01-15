@@ -4,7 +4,7 @@ from rembg import remove, new_session
 from PIL import Image, ImageOps, ImageFilter
 
 # --- CONFIGURATION ---
-INPUT_FOLDER = "/Users/leefrank/Desktop/full_library" 
+INPUT_FOLDER = "/Users/leefrank/Desktop/test" 
 OUTPUT_FOLDER = "/Users/leefrank/Desktop/FINAL_PRODUCTION_CLEAN"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
