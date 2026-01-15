@@ -35,13 +35,15 @@ def apply_rotated_rectangle(orig_img, mask_np):
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     if contours:
-        # Combine all parts (text, central photo, etc.) into one point cloud
+        # Combine all parts into one point cloud
         all_points = np.concatenate(contours)
         
         # 3. Calculate the Rotated Bounding Box
         rect = cv2.minAreaRect(all_points)
         box = cv2.boxPoints(rect)
-        box = np.int0(box) # Convert coordinates to integers
+        
+        # FIX: Use .astype(int) instead of np.int0 for NumPy 2.0 compatibility
+        box = box.astype(int) 
         
         # 4. Create a fresh solid white mask for the 4 corners
         h, w = mask_np.shape
@@ -58,10 +60,8 @@ def apply_rotated_rectangle(orig_img, mask_np):
         
         mask_pil = Image.fromarray(clean_mask).resize(orig_img.size, Image.LANCZOS)
     else:
-        # Fallback to standard mask if nothing is detected
         mask_pil = Image.fromarray((mask_np * 255).astype(np.uint8)).resize(orig_img.size, Image.LANCZOS)
     
-    # Apply mask to original
     res = orig_img.convert("RGBA")
     res.putalpha(mask_pil)
     return res
